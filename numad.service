@@ -1,0 +1,12 @@
+[Unit]
+Description=numad - The NUMA daemon that manages application locality.
+After=syslog.target
+
+[Service]
+EnvironmentFile=/etc/numad.conf
+ExecStart=/usr/bin/numad -i $INTERVAL
+
+[Install]
+WantedBy=multi-user.target
+
+

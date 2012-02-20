@@ -1,0 +1,67 @@
+.TH "numad" "8" "0.5.0" "Bill Gray" "Administration"
+.SH "nuamd"
+.LP 
+numad \- A user\-level daemon that manages and advises on optimum use of CPUs and memory on systems with NUMA topology.
+.SH "SYNTAX"
+.LP 
+numad [\fI\-dhqvV\fP]
+.br 
+.LP 
+numad  [\fI\-i interval\fP]
+.br 
+.LP 
+numad  [\fI\-w NCPUS[:MB]\fP]
+.br 
+.LP 
+numad  [\fI\-u target_utilization\fP]
+.br 
+.SH "DESCRIPTION"
+.LP 
+Numad is a system daemon that monitors NUMA topology and usage. It will attempt to locate significant processes for good NUMA locality dynamically adjusting to changing system conditions. Numad also provides guidance to assist management applications with initial manual binding of CPU and memory resources for their processes.
+.SH "OPTIONS"
+.LP 
+.TP 
+\fB\-h\fR
+Output help information and exit.
+.TP 
+\fB\-i\fR <\fIinterval\fP>
+Sets the time between system scans, in seconds <\fIinterval\fP>. Allowable intervals are between 2 and 10 seconds.
+.TP 
+\fB\-q\fR
+Quiet operation, limit logging.
+.TP 
+\fB\-u  <\fItarget_utilization\fP>
+Set the desired maximum consumption percentage of a node. Default is 90%.TP 
+\fB\-v\fR
+Verbose output.
+.TP 
+\fB\-V\fR
+Output version information and exit.
+.TP 
+\fB\-w\fR <\fINCPUS[:MB]\fP>
+Queries numad for the best CPUs to bind an entity that needs <\fINCPUS\fP>. Optionally, the amount of memory for the entity can be specified as well <\fI:MB\fP> so numad can pick CPUS on a node with adequate free memory. Output of this option is a string that contains a node list. For example: 2\-3,6.
+.SH "FILES"
+.LP 
+\fI/usr/bin/numad\fP 
+.br 
+\fI/var/log/numad.log\fP 
+.br 
+\fI/var/run/numad.pid\fP 
+.SH "ENVIRONMENT VARIABLES"
+.LP 
+.TP 
+None.
+.SH "EXAMPLES"
+.LP 
+Numad is normally run a system daemon and should be managed by the 
+standard init mechanisms of the host.
+.LP  
+To run this program manually type:
+.LP 
+/usr/bin/numad
+.SH "AUTHORS"
+.LP 
+Bill Gray <bgray@redhat.com>
+.SH "SEE ALSO"
+.LP 
+numactl(8)
