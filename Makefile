@@ -43,6 +43,7 @@ RANLIB ?= ranlib
 install: numad
 	mkdir -p ${prefix}/bin
 	install -m 0755 numad ${prefix}/bin
+	install -m 0644 numad.8 ${prefix}/share/man/man8
 
 clean: 
 	rm -f ${CLEANFILES}
