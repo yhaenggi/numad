@@ -1,13 +1,16 @@
 .TH "numad" "8" "0.5.0" "Bill Gray" "Administration"
 .SH "nuamd"
 .LP 
-numad \- A user\-level daemon that manages and advises on optimum use of CPUs and memory on systems with NUMA topology.
+numad \- A user\-level daemon that provides advice and managment for optimum use of CPUs and memory on systems with NUMA topology.
 .SH "SYNTAX"
 .LP 
-numad [\fI\-dhqvV\fP]
+numad [\fI\-dhvV\fP]
 .br 
 .LP 
-numad  [\fI\-i interval\fP]
+numad  [\fI\-i max_interval[:min_interval]\fP]
+.br 
+.LP 
+numad  [\fI\-l log_level\fP]
 .br 
 .LP 
 numad  [\fI\-w NCPUS[:MB]\fP]
@@ -17,23 +20,29 @@ numad  [\fI\-u target_utilization\fP]
 .br 
 .SH "DESCRIPTION"
 .LP 
-Numad is a system daemon that monitors NUMA topology and usage. It will attempt to locate significant processes for good NUMA locality dynamically adjusting to changing system conditions. Numad also provides guidance to assist management applications with initial manual binding of CPU and memory resources for their processes.
+Numad is a system daemon that monitors NUMA topology and usage. It will attempt to locate 
+processes for optimum NUMA locality, dynamically adjusting to changing system conditions. Numad also provides guidance to assist management applications with initial manual binding of CPU and memory resources for their processes.
 .SH "OPTIONS"
 .LP 
 .TP 
 \fB\-h\fR
 Output help information and exit.
 .TP 
-\fB\-i\fR <\fIinterval\fP>
-Sets the time between system scans, in seconds <\fIinterval\fP>. Allowable intervals are between 2 and 10 seconds.
-.TP 
-\fB\-q\fR
-Quiet operation, limit logging.
+\fB\-i\fR <\fImax_interval[:min_interval]\fP>
+Sets the time interval that numad waits between system scans, in seconds <\fImax_interval\fP>. Default <\fImax_interval\fP> is 15 seconds, default <\fImin_interval\fP> is 5 seconds.
+Setting a <\fImax_interval\fP> of zero will cause the daemon to exit.
 .TP 
 \fB\-u  <\fItarget_utilization\fP>
-Set the desired maximum consumption percentage of a node. Default is 90%.TP 
+Set the desired maximum consumption percentage of a node. Default is 85%
+.TP 
+\fB\-d\fR
+Debug output, sets the log level to LOG_DEBUG.
+.TP 
 \fB\-v\fR
-Verbose output.
+Verbose output, sets the log level to LOG_INFO.
+.TP 
+\fB\-l\fR <\fIlog_level\fP>
+Sets the log level to <\fIlog_level\fP>.
 .TP 
 \fB\-V\fR
 Output version information and exit.
