@@ -1,0 +1,97 @@
+#!/bin/bash
+# chkconfig: - 99 1
+# description: Control operation of nunmad which will monitior and
+#              rebalance assignement of NUMA resources.
+
+##
+## BEGIN INIT INFO
+# Provides: numad
+# Default-Start:
+# Default-Stop:
+# Required-Start:
+#              
+# Short-Description: numad control 
+## END INIT INFO
+# numad:        Set up numad
+# config: /etc/numad.conf
+#
+#
+
+
+# Source function library.
+. /etc/init.d/functions
+
+#source the config file, if it's there
+if [ -f /etc/numad.conf ]; then
+  . /etc/numad.conf
+fi
+
+LOCKFILE=/var/lock/subsys/numad
+
+base=${0##*/}
+
+start() {
+	echo -n "Starting numad"
+
+	[ -f "$LOCKFILE" ] && return 0
+	touch $LOCKFILE
+	/usr/bin/numad -i $INTERVAL|| return $? 
+	return 0
+}
+
+stop() {
+	echo -n "Stopping numad"
+	/usr/bin/numad -i 0
+	[ -f "$LOCKFILE" ] || return 1
+	rm $LOCKFILE
+}
+
+status() {
+	if [ -f "$LOCKFILE" ]; then 
+	    echo "$base is running"
+	else
+	    echo "$base is stopped"
+	fi
+	exit 0
+}
+
+restart() {
+	stop && start
+}
+
+condrestart(){
+    [ -e "$LOCKFILE" ] && restart
+}
+
+case "$1" in
+    restart)
+	restart && success || failure
+	;;
+
+    start)
+	start && success || failure
+	echo
+	;;
+
+    stop)
+	stop && success || failure
+	;;
+
+    status)
+	status
+	;;
+
+    reload)
+	stop
+	start
+	;;
+
+    condrestart|try-restart)
+        condrestart && success || :
+        ;;
+
+    *)
+	echo $"Usage: $0 {start|stop|status|restart|reload|condrestart|try-restart}"
+	exit 3
+	;;
+esac
