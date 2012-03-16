@@ -15,6 +15,11 @@
 # Description:      
 ### END INIT INFO
 
+if [ $(id -u) -ne 0 ]; then
+    echo "This script can be run by root only. Exiting."
+    exit 4
+fi
+
 # Source function library.
 . /etc/rc.d/init.d/functions
 
@@ -32,7 +37,7 @@ start() {
     [ -f $config ] || exit 6
     echo -n $"Starting $prog: "
     . $config
-    daemon "$exec -i $config"
+    daemon "$exec -i $INTERVAL"
     retval=$?
     echo
     [ $retval -eq 0 ] && touch $lockfile
