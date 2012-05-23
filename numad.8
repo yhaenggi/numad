@@ -7,48 +7,115 @@ numad \- A user\-level daemon that provides advice and managment for optimum use
 numad [\fI\-dhvV\fP]
 .br 
 .LP 
-numad  [\fI\-i max_interval[:min_interval]\fP]
+numad  [\fI\-D non-standard-cgroup-mount-point\fP]
+.br 
+.LP 
+numad  [\fI\-i [min_interval:]max_interval\fP]
 .br 
 .LP 
 numad  [\fI\-l log_level\fP]
 .br 
 .LP 
-numad  [\fI\-w NCPUS[:MB]\fP]
+numad  [\fI\-p PID\fP]
+.br 
+.LP 
+numad  [\fI\-r PID\fP]
+.br 
+.LP 
+numad  [\fI\-S 0|1\fP]
 .br 
 .LP 
 numad  [\fI\-u target_utilization\fP]
 .br 
+.LP 
+numad  [\fI\-w NCPUS[:MB]\fP]
+.br 
+
 .SH "DESCRIPTION"
 .LP 
-Numad is a system daemon that monitors NUMA topology and usage. It will attempt to locate 
-processes for optimum NUMA locality, dynamically adjusting to changing system conditions. Numad also provides guidance to assist management applications with initial manual binding of CPU and memory resources for their processes.
+Numad is a system daemon that monitors NUMA topology and usage. It will attempt
+to locate processes for optimum NUMA locality and affinity, dynamically
+adjusting to changing system conditions. Numad also provides guidance to assist
+management applications with initial manual binding of CPU and memory resources
+for their processes.
 .SH "OPTIONS"
 .LP 
 .TP 
-\fB\-h\fR
-Output help information and exit.
-.TP 
-\fB\-i\fR <\fImax_interval[:min_interval]\fP>
-Sets the time interval that numad waits between system scans, in seconds <\fImax_interval\fP>. Default <\fImax_interval\fP> is 15 seconds, default <\fImin_interval\fP> is 5 seconds.
-Setting a <\fImax_interval\fP> of zero will cause the daemon to exit.
-.TP 
-\fB\-u  <\fItarget_utilization\fP>
-Set the desired maximum consumption percentage of a node. Default is 85%
-.TP 
 \fB\-d\fR
-Debug output, sets the log level to LOG_DEBUG.
+Debug output in log, sets the log level to LOG_DEBUG.  Same effect as \fI\-l 7\fP.
+.TP
+\fB\-D\fR <\fInon-standard-cgroup-mount-point\fP>
+This option can be used to communicate a non-standard cgroup mount point to
+numad.  This is not normally necessary.
 .TP 
-\fB\-v\fR
-Verbose output, sets the log level to LOG_INFO.
+\fB\-h\fR
+Display usage help information and exit.
+.TP 
+\fB\-i\fR <\fI[min_interval:]max_interval\fP>
+Sets the time interval that numad waits between system scans, in seconds to
+<\fImax_interval\fP>. Default <\fImax_interval\fP> is 15 seconds, default
+<\fImin_interval\fP> is 5 seconds.  Setting a <\fImax_interval\fP> of zero will
+cause the daemon to exit.  (This is the normal mechanism to terminate the
+daemon.)  A bigger <\fImax_interval\fP> will decrease numad overhead but also
+decrease responsiveness to changing loads.
 .TP 
 \fB\-l\fR <\fIlog_level\fP>
-Sets the log level to <\fIlog_level\fP>.
+Sets the log level to <\fIlog_level\fP>.  Good choices are 5, 6, or 7.  The default value is 5.
+.TP
+\fB\-p\fR <\fIPID\fP>
+Add PID to explicit list of processes to consider for managing, if the process
+uses significant resources.  Multiple \fI\-p PID\fP options can be specified at
+daemon start, but after deamon start, only one PID can be added to the explicit
+list per subsequent numad invocation.  Use with \-S to precisely control the
+scope of processes numad can manage.  Note that (currently) the specified
+process will not necessarily be actively managed unless it also meets numad's
+significance threshold.
+.TP
+\fB\-r\fR <\fIPID\fP>
+Remove PID from explicit list of processes to consider for managing.  After
+deamon start, only one PID can be removed from the explicit process list per
+subsequent numad invocation.  Use with \-S and \-p to precisely control the
+scope of processes numad can manage.  (Currently, removed PIDs are not excluded
+when scanning all processes.  In the future, removed PIDs may be added to a
+PID-exclusion list.  Currently it makes sense to remove a PID from the explicit
+list only when using \fI-S 0\fP and previously having used \-p to add the PID.)
+.TP
+\fB\-S\fR <\fI0|1\fP>
+This option controls whether numad scans all system processes or only the
+explicit PID list.  The default is to scan all processes.  Use \fI\-S 0\fP to
+scan only the explicit PID list.  Use \fI\-S 1\fP to again scan all system
+processes.  Starting numad as
+.br
+\fInumad \-S 0 \-p <PID-1> \-p <PID-2> \-p <PID-3>\fP
+.br
+will limit scanning, and thus also automatic NUMA management, to only those
+three explicitly specified processes.
+.TP 
+\fB\-u\fR  <\fItarget_utilization\fP>
+Set the desired maximum consumption percentage of a node. Default is 85%.
+Decrease the target value to maintain more available resource margin.  Increase
+the target value to more exhaustively consume node resources.
+.TP 
+\fB\-v\fR
+Verbose output in log, sets the log level to LOG_INFO.  Same effect as \fI\-l 6\fP.
 .TP 
 \fB\-V\fR
-Output version information and exit.
+Display version information and exit.
 .TP 
 \fB\-w\fR <\fINCPUS[:MB]\fP>
-Queries numad for the best CPUs to bind an entity that needs <\fINCPUS\fP>. Optionally, the amount of memory for the entity can be specified as well <\fI:MB\fP> so numad can pick CPUS on a node with adequate free memory. Output of this option is a string that contains a node list. For example: 2\-3,6.
+Queries numad for the best NUMA nodes to bind an entity that needs
+<\fINCPUS\fP>.  The amount of memory (in MBs) is optional, but should be
+specified as well <\fI:MB\fP> so numad can recommend NUMA nodes with available
+CPU capacity and adequate free memory.  This query option can be used
+regardless of whether numad is running as a daemon.  (An invocation using this
+option when numad is not running as a daemon, will not cause the deamon to
+start.) Output of this option is a string that contains a NUMA node list.
+For example: 2\-3,6.  The recommended node list could be saved in a shell variable
+(e.g., NODES) and then used as the node list parameter in a
+.br
+\fInumactl \-m $NODES \-N $NODES ... \fP
+.br
+command.  See numactl(8).
 .SH "FILES"
 .LP 
 \fI/usr/bin/numad\fP 
@@ -62,15 +129,18 @@ Queries numad for the best CPUs to bind an entity that needs <\fINCPUS\fP>. Opti
 None.
 .SH "EXAMPLES"
 .LP 
-Numad is normally run a system daemon and should be managed by the 
+Numad is normally run as a system daemon and should be managed by the 
 standard init mechanisms of the host.
 .LP  
-To run this program manually type:
+If interactive (manual) control is desired, you can start the daemon manually by typing:
 .LP 
 /usr/bin/numad
+.LP
+Subsequent numad invocations while the daemon is running can be used to dynamically change run-time options.
 .SH "AUTHORS"
 .LP 
 Bill Gray <bgray@redhat.com>
 .SH "SEE ALSO"
 .LP 
 numactl(8)
+

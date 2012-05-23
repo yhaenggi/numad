@@ -33,7 +33,7 @@ TODO:
 
 - fix issues
 - verify args
-- inclusion / exclusion lists, per-process ???force??? flags
+- inclusion / exclusion lists, specific PIDs only, per-process ???force??? flags
 - add option to self-calculate SLIT distance info
 - extend dynamic intervals?
 - hi / lo watermarks, and ring buffer for processor cpu_used
@@ -80,7 +80,7 @@ TODO:
 
 
 
-#define VERSION_STRING "20120305b"
+#define VERSION_STRING "20120522b"
 
 
 
@@ -115,12 +115,13 @@ char *cpuset_dir_list[] =  {
 
 #define CPU_SCALE_FACTOR 100
 
-#define CPU_THRESHOLD    30
+#define CPU_THRESHOLD    50
 #define MEMORY_THRESHOLD 300
 
 #define MIN_INTERVAL  5
 #define MAX_INTERVAL 15
 #define TARGET_UTILIZATION_PERCENT 85
+#define IMPROVEMENT_THRESHOLD_PERCENT 5
 
 
 #define ELIM_NEW_LINE(s) \
@@ -145,8 +146,10 @@ int huge_page_size_in_bytes = 0;
 int min_interval = MIN_INTERVAL;
 int max_interval = MAX_INTERVAL;
 int target_utilization  = TARGET_UTILIZATION_PERCENT;
+int scan_all_processes = 1;
 
-pthread_mutex_t mutex;
+pthread_mutex_t pid_list_mutex;
+pthread_mutex_t node_info_mutex;
 int requested_mbs = 0;
 int requested_cpus = 0;
 
@@ -192,6 +195,55 @@ void close_log_file() {
     if (log_fs != NULL) {
         fclose(log_fs);
         log_fs = NULL;
+    }
+}
+
+
+typedef struct pid_list_node {
+    long pid;
+    struct pid_list_node* next;
+} pid_list_node_t, *pid_list_node_p;
+
+pid_list_node_p pid_list = NULL;
+
+void insert_pid_into_pid_list(long pid) {
+    // Check for duplicate pid first
+    pid_list_node_p pid_ptr = pid_list;
+    while (pid_ptr != NULL) {
+        if (pid_ptr->pid == pid) {
+            return; // pid already in list
+        }
+        pid_ptr = pid_ptr->next;
+    }
+    // pid not yet in list -- insert new node
+    pid_ptr = malloc(sizeof(pid_list_node_t));
+    if (pid_ptr == NULL) {
+        numad_log(LOG_CRIT, "pid_list malloc failed\n");
+        exit(EXIT_FAILURE);
+    }
+    pid_ptr->pid = pid;
+    pid_ptr->next = pid_list;
+    pid_list = pid_ptr;
+}
+
+void remove_pid_from_pid_list(long pid) {
+    pid_list_node_p last_pid_ptr = NULL;
+    pid_list_node_p pid_ptr = pid_list;
+    while (pid_ptr != NULL) {
+        if (pid_ptr->pid == pid) {
+            if (pid_ptr == pid_list) {
+                pid_list = pid_list->next;
+                free(pid_ptr);
+                pid_ptr = pid_list;
+                continue;
+            } else {
+                last_pid_ptr->next = pid_ptr->next;
+                free(pid_ptr);
+                pid_ptr = last_pid_ptr;
+            }
+        }
+        last_pid_ptr = pid_ptr;
+        pid_ptr = pid_ptr->next;
     }
 }
 
@@ -275,13 +327,19 @@ void print_version_and_exit(char *prog_name) {
 
 void print_usage_and_exit(char *prog_name) {
     fprintf(stderr, "Usage: %s <options> ...\n", prog_name);
+    fprintf(stderr, "-d for debug logging (same effect as '-l 7'\n");
+    fprintf(stderr, "-D <CGROUP_MOUNT_POINT> to specify cgroup mount point\n");
     fprintf(stderr, "-h to print this usage info\n");
     fprintf(stderr, "-i [<MIN>:]<MAX> to specify interval seconds\n");
     fprintf(stderr, "-l <N> to specify logging level (usually 5, 6, or 7)\n");
-    fprintf(stderr, "-u <N> to specify target utilization percent\n");
+    fprintf(stderr, "-p <PID> to add PID to explicit pid list\n");
+    fprintf(stderr, "-r <PID> to remove PID from explicit pid list\n");
+    fprintf(stderr, "-S 1  to scan all processes\n");
+    fprintf(stderr, "-S 0  to scan only explicit PID list processes\n");
+    fprintf(stderr, "-u <N> to specify target utilization percent (default 85)\n");
     fprintf(stderr, "-v for verbose  (same effect as '-l 6'\n");
     fprintf(stderr, "-V to show version info\n");
-    fprintf(stderr, "-w <CPUs>[:<MBs>] for node suggestions\n");
+    fprintf(stderr, "-w <CPUs>[:<MBs>] for NUMA node suggestions\n");
     exit(EXIT_FAILURE);
 }
 
@@ -710,14 +768,14 @@ void check_prereqs(char *prog_name) {
             char *p = buf;
             CONVERT_DIGITS_TO_NUM(p, ms);
         }
-        if (ms > 100) {
+        if (ms > 150) {
             fprintf(stderr, "\n");
             numad_log(LOG_NOTICE, "Looks like transparent hugepage scan time in %s is %d ms.\n", thp_scan_fname, ms);
             fprintf(stderr,       "Looks like transparent hugepage scan time in %s is %d ms.\n", thp_scan_fname, ms);
             fprintf(stderr, "Consider increasing the frequency of THP scanning,\n");
-            fprintf(stderr, "by echoing a smaller number (e.g. 10) to %s\n", thp_scan_fname);
+            fprintf(stderr, "by echoing a smaller number (e.g. 100) to %s\n", thp_scan_fname);
             fprintf(stderr, "to more agressively (re)construct THPs.  For example:\n");
-            fprintf(stderr, "# echo 10 > /sys/kernel/mm/redhat_transparent_hugepage/khugepaged/scan_sleep_millisecs\n");
+            fprintf(stderr, "# echo 100 > /sys/kernel/mm/redhat_transparent_hugepage/khugepaged/scan_sleep_millisecs\n");
             fprintf(stderr, "\n");
             // For a similar tool, IBM monitored the cpu utilization of the khugepaged
             // kernel thread using a pidstat like utility and saw very low utilization
@@ -950,36 +1008,40 @@ int bind_process_and_migrate_memory(int pid, char *cpuset_name, id_list_p node_l
     // Now that we have a cpuset for pid and a populated cpulist,
     // start the actual binding and migration.
     uint64_t t0 = get_uptime(NULL);
-    // Write CPU IDs out to cpuset.cpus file
+
+    // Write "1" out to cpuset.memory_migrate file
     char fname[FNAME_SIZE];
-    char id_list_buf[BUF_SIZE];
-    snprintf(fname, FNAME_SIZE, "%s/cpuset.cpus", cpuset_name);
+    snprintf(fname, FNAME_SIZE, "%s/cpuset.memory_migrate", cpuset_name);
     int fd = open(fname, O_WRONLY | O_TRUNC, 0);
     if (fd == -1) {
-        numad_log(LOG_CRIT, "Could not open cpuset.cpus -- errno: %d\n", errno);
+        numad_log(LOG_CRIT, "Could not open cpuset.memory_migrate -- errno: %d\n", errno);
         return 0;
     }
-    int len = str_from_id_list(id_list_buf, BUF_SIZE, cpu_list_p);
-    write(fd, id_list_buf, len);
+    write(fd, "1", 1);
     close(fd);
+
     // Write node IDs out to cpuset.mems file
+    char node_list_buf[BUF_SIZE];
     snprintf(fname, FNAME_SIZE, "%s/cpuset.mems", cpuset_name);
     fd = open(fname, O_WRONLY | O_TRUNC, 0);
     if (fd == -1) {
         numad_log(LOG_CRIT, "Could not open cpuset.mems -- errno: %d\n", errno);
         return 0;
     }
-    len = str_from_id_list(id_list_buf, BUF_SIZE, node_list_p);
-    write(fd, id_list_buf, len);
+    int len = str_from_id_list(node_list_buf, BUF_SIZE, node_list_p);
+    write(fd, node_list_buf, len);
     close(fd);
-    // Write "1" out to cpuset.memory_migrate file
-    snprintf(fname, FNAME_SIZE, "%s/cpuset.memory_migrate", cpuset_name);
+
+    // Write CPU IDs out to cpuset.cpus file
+    char cpu_list_buf[BUF_SIZE];
+    snprintf(fname, FNAME_SIZE, "%s/cpuset.cpus", cpuset_name);
     fd = open(fname, O_WRONLY | O_TRUNC, 0);
     if (fd == -1) {
-        numad_log(LOG_CRIT, "Could not open cpuset.memory_migrate -- errno: %d\n", errno);
+        numad_log(LOG_CRIT, "Could not open cpuset.cpus -- errno: %d\n", errno);
         return 0;
     }
-    write(fd, "1", 1);
+    len = str_from_id_list(cpu_list_buf, BUF_SIZE, cpu_list_p);
+    write(fd, cpu_list_buf, len);
     close(fd);
 
     // Copy pid tasks one at a time to tasks file
@@ -1001,6 +1063,7 @@ int bind_process_and_migrate_memory(int pid, char *cpuset_name, id_list_p node_l
         numad_log(LOG_NOTICE, "Including task: %s\n", namelist[ix]->d_name);
         write(fd, namelist[ix]->d_name, strlen(namelist[ix]->d_name));
     }
+    free(namelist);
     close(fd);
 
     uint64_t t1 = get_uptime(NULL);
@@ -1010,7 +1073,7 @@ int bind_process_and_migrate_memory(int pid, char *cpuset_name, id_list_p node_l
         numad_log(LOG_WARNING, "Could not migrate pid\n");
         return 0;  // Assume the process terminated
     }
-    numad_log(LOG_NOTICE, "PID %d moved to node(s) %s in %d.%d seconds\n", pid, id_list_buf, (t1-t0)/100, (t1-t0)%100);
+    numad_log(LOG_NOTICE, "PID %d moved to node(s) %s in %d.%d seconds\n", pid, node_list_buf, (t1-t0)/100, (t1-t0)%100);
     return 1;
 }
 
@@ -1284,55 +1347,98 @@ int update_processes() {
     // time stamp and utilization numbers for the select processes in the hash table.
     // Then, go through all managed processes to prune out-of-date or dead ones.
     uint64_t this_update_time = get_uptime(NULL);
-    struct dirent **namelist;
-    int files = scandir("/proc", &namelist, name_starts_with_digit, NULL);
-    if (files < 0) {
-        numad_log(LOG_CRIT, "Could not open /proc\n");
-        exit(EXIT_FAILURE);
+    stat_data_p sdata_p;
+    char fname[FNAME_SIZE];
+    int files = 0;
+    if (scan_all_processes) {
+        struct dirent **namelist;
+        files = scandir("/proc", &namelist, name_starts_with_digit, NULL);
+        if (files < 0) {
+            numad_log(LOG_CRIT, "Could not open /proc\n");
+            exit(EXIT_FAILURE);
+        }
+        for (int ix = 0;  (ix < files);  ix++) {
+            snprintf(fname, FNAME_SIZE, "/proc/%s/stat", namelist[ix]->d_name);
+            if ((sdata_p = get_stat_data(fname)) != NULL) {
+                // See if this process significant enough to be managed on short list
+                // FIXME: should not this first conditional be the same as magnitude test in manage_load()?
+                if ( (sdata_p->rss * page_size_in_bytes > MEMORY_THRESHOLD * MEGABYTE)) {
+                    process_data_t pdata;
+                    pdata.uptime = get_uptime(NULL);  // get_uptime() soon after get_stat_data()
+                    // FIXME: Replace unconditional "1" below with more filters
+                    // and tests here as well as perhaps explicit process
+                    // inclusion and exclusion lists, before we decide to add
+                    // this process to our managed set of candidate processes.
+                    //
+                    // Should perhaps include all VM processes as well as any
+                    // other process with a non-default cpuset.
+                    //
+                    // printf("PID: %d %s %d %lu\n", sdata_p->pid, sdata_p->comm, sdata_p->num_threads, sdata_p->vsize);
+                    if (1) {
+                        pdata.pid = sdata_p->pid;
+                        // pdata.pgrp = sdata_p->pgrp;
+                        pdata.comm = sdata_p->comm;
+                        pdata.utime = sdata_p->utime;
+                        pdata.stime = sdata_p->stime;
+                        // pdata.priority = sdata_p->priority;
+                        // pdata.nice = sdata_p->nice;
+                        pdata.num_threads = sdata_p->num_threads;
+                        // pdata.starttime = sdata_p->starttime;
+                        // pdata.vsize_MBs = sdata_p->vsize / MEGABYTE;
+                        pdata.rss_MBs = (sdata_p->rss * page_size_in_bytes) / MEGABYTE;
+                        pdata.processor = sdata_p->processor;
+                        // pdata.rt_priority = sdata_p->rt_priority;
+                        // pdata.policy = sdata_p->policy;
+                        // pdata.guest_time = sdata_p->guest_time;
+                        process_hash_update(&pdata);
+                    }
+                }
+        
+            }
+        }
+        free(namelist);
     }
+    // Include candidate processes from the explicit pid list, if not already in hash table
+    pthread_mutex_lock(&pid_list_mutex);
+    pid_list_node_p pid_ptr = pid_list;
+    while (pid_ptr != NULL) {
+        int hash_ix = process_hash_lookup(pid_ptr->pid);
+        if ( (hash_ix >= 0) && (process_hash_table[hash_ix].uptime > this_update_time)) {
+            pid_ptr = pid_ptr->next;
+            continue;  // already in hash table / short list, and recently updated
+        }
+        snprintf(fname, FNAME_SIZE, "/proc/%d/stat", pid_ptr->pid);
+        if ((sdata_p = get_stat_data(fname)) != NULL) {
+            files += 1;
+            process_data_t pdata;
+            pdata.uptime = get_uptime(NULL);  // get_uptime() soon after get_stat_data()
+            pdata.pid = sdata_p->pid;
+            // pdata.pgrp = sdata_p->pgrp;
+            pdata.comm = sdata_p->comm;
+            pdata.utime = sdata_p->utime;
+            pdata.stime = sdata_p->stime;
+            // pdata.priority = sdata_p->priority;
+            // pdata.nice = sdata_p->nice;
+            pdata.num_threads = sdata_p->num_threads;
+            // pdata.starttime = sdata_p->starttime;
+            // pdata.vsize_MBs = sdata_p->vsize / MEGABYTE;
+            pdata.rss_MBs = (sdata_p->rss * page_size_in_bytes) / MEGABYTE;
+            pdata.processor = sdata_p->processor;
+            // pdata.rt_priority = sdata_p->rt_priority;
+            // pdata.policy = sdata_p->policy;
+            // pdata.guest_time = sdata_p->guest_time;
+            process_hash_update(&pdata);
+            pid_ptr = pid_ptr->next;
+        } else {
+            // no stat file so assume pid dead -- remove it from pid list
+            remove_pid_from_pid_list(pid_ptr->pid);
+            pid_ptr = pid_list;  // just restart from list beginning
+            continue;
+        }
+    }
+    pthread_mutex_unlock(&pid_list_mutex);
     if (log_level >= LOG_INFO) {
         numad_log(LOG_INFO, "Processes: %d\n", files);
-    }
-    for (int ix = 0;  (ix < files);  ix++) {
-        stat_data_p sdata_p;
-        char fname[FNAME_SIZE];
-        snprintf(fname, FNAME_SIZE, "/proc/%s/stat", namelist[ix]->d_name);
-        if ((sdata_p = get_stat_data(fname)) != NULL) {
-            // See if this process significant enough to be managed on short list
-            // FIXME: should not this first conditional be the same as magnitude test in manage_load()?
-            if ( (sdata_p->rss * page_size_in_bytes > 150 * MEGABYTE)) {
-                process_data_t pdata;
-                pdata.uptime = get_uptime(NULL);  // get_uptime() soon after get_stat_data()
-                // FIXME: Replace unconditional "1" below with more filters
-                // and tests here as well as perhaps explicit process
-                // inclusion and exclusion lists, before we decide to add
-                // this process to our managed set of candidate processes.
-                //
-                // Should perhaps include all VM processes as well as any
-                // other process with a non-default cpuset.
-                //
-                // printf("PID: %d %s %d %lu\n", sdata_p->pid, sdata_p->comm, sdata_p->num_threads, sdata_p->vsize);
-                if (1) {
-                    pdata.pid = sdata_p->pid;
-                    // pdata.pgrp = sdata_p->pgrp;
-                    pdata.comm = sdata_p->comm;
-                    pdata.utime = sdata_p->utime;
-                    pdata.stime = sdata_p->stime;
-                    // pdata.priority = sdata_p->priority;
-                    // pdata.nice = sdata_p->nice;
-                    pdata.num_threads = sdata_p->num_threads;
-                    // pdata.starttime = sdata_p->starttime;
-                    // pdata.vsize_MBs = sdata_p->vsize / MEGABYTE;
-                    pdata.rss_MBs = (sdata_p->rss * page_size_in_bytes) / MEGABYTE;
-                    pdata.processor = sdata_p->processor;
-                    // pdata.rt_priority = sdata_p->rt_priority;
-                    // pdata.policy = sdata_p->policy;
-                    // pdata.guest_time = sdata_p->guest_time;
-                    process_hash_update(&pdata);
-                }
-            }
-    
-        }
     }
     // Prune out-of-date processes
     for (int ix = 0;  (ix < PROCESS_HASH_TABLE_SIZE);  ix++) {
@@ -1371,13 +1477,15 @@ int update_processes() {
 id_list_p pick_numa_nodes(int pid, int cpus, int mbs) {
     int pid_ix;
     process_data_p p = NULL;
-    int cpuset_name_len = 0;
     static id_list_p existing_mems_list_p;
-    uint64_t process_MBs[MAX_NODES];
-    uint64_t process_CPUs[MAX_NODES];
     CLEAR_LIST(existing_mems_list_p);
+    int num_existing_mems = 0;
+    uint64_t process_MBs[MAX_NODES];
     memset(process_MBs,  0, sizeof(process_MBs));
+#if (NEED_PROCESS_CPUS)
+    uint64_t process_CPUs[MAX_NODES];
     memset(process_CPUs, 0, sizeof(process_CPUs));
+#endif 
     if (log_level >= LOG_DEBUG) {
         numad_log(LOG_DEBUG, "PICK NODES FOR:  PID: %d,  CPUs %d,  MBs %d\n", pid, cpus, mbs);
     }
@@ -1386,6 +1494,7 @@ id_list_p pick_numa_nodes(int pid, int cpus, int mbs) {
         p = &process_hash_table[pid_ix];
         char buf[BUF_SIZE];
         char fname[FNAME_SIZE];
+
         // First get cpuset name for this process, and existing mems binding, if any.
         snprintf(fname, FNAME_SIZE, "/proc/%d/cpuset", pid);
         FILE *fs = fopen(fname, "r");
@@ -1395,7 +1504,7 @@ id_list_p pick_numa_nodes(int pid, int cpus, int mbs) {
         }
         if (!fgets(buf, BUF_SIZE, fs)) {
             numad_log(LOG_WARNING, "Tried to research PID %d cpuset, but it apparently went away.\n", p->pid);
-	    // FIXME: open file leak
+	    fclose(fs);
             return NULL;  // Assume the process terminated?
         }
         fclose(fs);
@@ -1406,12 +1515,10 @@ id_list_p pick_numa_nodes(int pid, int cpus, int mbs) {
             }
             p->cpuset_name = strdup(buf);
         }
-        cpuset_name_len = strlen(p->cpuset_name);
         if (log_level >= LOG_DEBUG) {
             numad_log(LOG_DEBUG, "CPUSET_NAME: %s\n", p->cpuset_name);
         }
 
-        int num_existing_mems = 0;
         snprintf(fname, FNAME_SIZE, "%s%s/cpuset.mems", cpuset_dir, p->cpuset_name);
         fs = fopen(fname, "r");
         if ((fs) && (fgets(buf, BUF_SIZE, fs))) {
@@ -1430,32 +1537,41 @@ id_list_p pick_numa_nodes(int pid, int cpus, int mbs) {
         // figure out what else can change that should cause a rebinding (e.g.
         // (1) some process gets sub-optimal allocation on busy machine which
         // subsequently becomes less busy leaving disadvantaged process. (2)
-        // node load imbalance, (3) any process split across nodes with should
+        // node load imbalance, (3) any process split across nodes which should
         // fit within a single node.)
         if (p->dup_bind_count > 1) {
             int node_id = 0;
             int nodes_have_cpu = 1;
             int nodes_have_ram = 1;
             int n = num_existing_mems;
+            int min_resource_pct = 100 - target_utilization;
+            if (min_resource_pct < 10) {
+                min_resource_pct = 10;
+            }
             while (n) {
                 if (ID_IS_IN_LIST(node_id, existing_mems_list_p)) {
-                    nodes_have_cpu &= ((100 * node[node_id].CPUs_free / node[node_id].CPUs_total) >= (100 - target_utilization));
-                    nodes_have_ram &= ((100 * node[node_id].MBs_free  / node[node_id].MBs_total)  >= (100 - target_utilization));
+                    nodes_have_cpu &= ((100 * node[node_id].CPUs_free / node[node_id].CPUs_total) >= (min_resource_pct));
+                    nodes_have_ram &= ((100 * node[node_id].MBs_free  / node[node_id].MBs_total)  >= (min_resource_pct));
                     n -= 1;
                 }
                 node_id += 1;
             }
             if ((nodes_have_cpu) && (nodes_have_ram)) {
                 if (log_level >= LOG_DEBUG) {
-                    numad_log(LOG_DEBUG, "Skipping evaluation because of repeat binding\n", pid, cpus, mbs);
+                    numad_log(LOG_DEBUG, "Skipping evaluation because of repeat binding\n");
                 }
                 return NULL;
             }
+            if (log_level >= LOG_DEBUG) {
+                numad_log(LOG_DEBUG, "Evaluated for skipping by repeat binding, but CPUS: %d, RAM: %d\n", nodes_have_cpu, nodes_have_ram);
+            }
         }
 
-
-// FIXME: this scanning is expensive and must be minimized
-
+// FIXME: this scanning is expensive and must be minimized.  Not only is it
+// expensive, but older kernels dismantle transparent huge pages while
+// producing the numa memory map information!!  This THP issue is fixed in new
+// kernels -- and hopefully included in RHEL6.3 -- but the scanning will always
+// remain expensive and something that should be minimized...
 
         // Second, add up per-node memory in use by this process
         snprintf(fname, FNAME_SIZE, "/proc/%d/numa_maps", pid);
@@ -1492,6 +1608,8 @@ id_list_p pick_numa_nodes(int pid, int cpus, int mbs) {
         }
         fclose(fs);
 
+#if (NEED_PROCESS_CPUS)
+
         // Third, add up per-node CPUs recently used by this process
         snprintf(fname, FNAME_SIZE, "/proc/%d/task", pid);
         struct dirent **namelist;
@@ -1514,7 +1632,10 @@ id_list_p pick_numa_nodes(int pid, int cpus, int mbs) {
                 numad_log(LOG_DEBUG, "PROCESS_CPUs[%d]: %ld\n", ix, process_CPUs[ix]);
             }
         }
-    }
+
+#endif
+
+    }  // end of existing PID conditional
 
 
 
@@ -1529,22 +1650,64 @@ id_list_p pick_numa_nodes(int pid, int cpus, int mbs) {
     }
     memcpy(tmp_node, node, num_nodes * sizeof(node_data_t) );
 
-    // Add in the info specific to this process to equalize available resource
-    // quantities wrt locations of resources already in use by this process
+    // Add in info specific to this process to equalize available resource
+    // quantities wrt locations of resources already in use by this process.
+    // Average the amount of CPUs_free across the existing nodes used, because
+    // the threads are free to move around in that domain.  Inflate the value
+    // of already assigned memory by 3/2, because moving memory is expensive.  
+    uint64_t node_CPUs_free_for_this_process = 0;
+    if (num_existing_mems > 0) {
+        node_CPUs_free_for_this_process = cpus; // ?? Correct for utilization target inflation?
+        int node_id = 0;
+        int n = num_existing_mems;
+        while (n) {
+            if (ID_IS_IN_LIST(node_id, existing_mems_list_p)) {
+                node_CPUs_free_for_this_process += tmp_node[node_id].CPUs_free;
+                n -= 1;
+            }
+            node_id += 1;
+        }
+        // Divide to get average CPUs_free for the nodes in use by process
+        node_CPUs_free_for_this_process /= num_existing_mems;
+    }
     for (int ix = 0;  (ix < num_nodes);  ix++) {
-        tmp_node[ix].MBs_free  += process_MBs[ix];
+        tmp_node[ix].MBs_free  += ((process_MBs[ix] * 3) / 2);
+
+#if (NEED_PROCESS_CPUS)
+
         if (EQUAL_LISTS(existing_mems_list_p, all_nodes_list_p)) {
             // If not already bound, consider only available memory for now (by marking all CPUs free)
-            tmp_node[ix].CPUs_free = tmp_node[ix].CPUs_total;;
+            tmp_node[ix].CPUs_free = tmp_node[ix].CPUs_total;
 	} else {
             // If already bound, consider existing location of CPUs
             tmp_node[ix].CPUs_free += process_CPUs[ix];
 	}
+
+#endif
+
+        if ((num_existing_mems > 0) && (ID_IS_IN_LIST(ix, existing_mems_list_p))) {
+            tmp_node[ix].CPUs_free = node_CPUs_free_for_this_process;
+            if (log_level >= LOG_DEBUG) {
+                numad_log(LOG_DEBUG, "PROCESS_CPUs[%d]: %ld\n", ix, node_CPUs_free_for_this_process);
+            }
+        }
         if (tmp_node[ix].CPUs_free > tmp_node[ix].CPUs_total) {
             tmp_node[ix].CPUs_free = tmp_node[ix].CPUs_total;
         }
-        // Calculate magnitude clearly biased towards existing location of memory
-        tmp_node[ix].magnitude = tmp_node[ix].CPUs_free * (tmp_node[ix].MBs_free + ((2 * process_MBs[ix]) / 3));
+        // Calculate magnitude as product of available CPUs and available MBs
+        tmp_node[ix].magnitude = tmp_node[ix].CPUs_free * tmp_node[ix].MBs_free;
+        // Bias combined magnitude towards already assigned nodes
+        if (ID_IS_IN_LIST(ix, existing_mems_list_p)) {
+            tmp_node[ix].magnitude *= 5;
+            tmp_node[ix].magnitude /= 4;
+        }
+    }
+
+
+
+    uint64_t saved_magnitude_for_node[MAX_NODES];
+    for (int ix = 0;  (ix < num_nodes);  ix++) {
+        saved_magnitude_for_node[ix] = tmp_node[ix].magnitude;
     }
 
     static id_list_p target_node_list_p;
@@ -1558,7 +1721,14 @@ id_list_p pick_numa_nodes(int pid, int cpus, int mbs) {
         for (int ij = 0;  (ij < num_nodes);  ij++) {
             int big_ix = ij;
             for (int ik = ij;  (ik < num_nodes);  ik++) {
-                if (tmp_node[big_ix].magnitude < tmp_node[ik].magnitude) {
+                uint64_t ik_dist = 1;
+                uint64_t big_ix_dist = 1;
+                if (prev_node >= 0) {
+                    ik_dist = tmp_node[ik].distance[prev_node];
+                    big_ix_dist = tmp_node[big_ix].distance[prev_node];
+                }
+                // Scale magnitude comparison by distances to previous node used...
+                if ((tmp_node[big_ix].magnitude / big_ix_dist) < (tmp_node[ik].magnitude / ik_dist)) {
                     big_ix = ik;
                 }
             }
@@ -1608,11 +1778,15 @@ id_list_p pick_numa_nodes(int pid, int cpus, int mbs) {
         tmp_node[0].magnitude = tmp_node[0].CPUs_free * tmp_node[0].MBs_free;
 
 
-        // FIXME
+#if 0
+        // FIXME: delete this old hack since distance now incorporated in sort above
         // adjust all the magnitudes by the distance in very sketchy way
         for (int ix = 1;  (ix < num_nodes);  ix++) {
             tmp_node[ix].magnitude /= tmp_node[0].distance[tmp_node[ix].node_id];
         }
+#endif
+
+
     }
 
     // If this existing process is already located where we want it, and almost
@@ -1620,11 +1794,14 @@ id_list_p pick_numa_nodes(int pid, int cpus, int mbs) {
     // no need to change binding this time.
     if ((pid > 0) && (EQUAL_LISTS(target_node_list_p, existing_mems_list_p))) {
         // May not need to change binding.  However, if there is any significant
-        // memory still on non-target nodes, advise the bind anyway.
+        // memory still on non-target nodes, advise the bind anyway because
+        // there are some scenarios when the kernel will not move it all the
+        // first time.
+
         p->dup_bind_count += 1;
         for (int ix = 0;  (ix < num_nodes);  ix++) {
             if ((process_MBs[ix] > 10) && (!ID_IS_IN_LIST(ix, target_node_list_p))) {
-                goto advise_bind;
+                goto try_memory_move_again;
             }
         }
         return NULL;
@@ -1634,14 +1811,62 @@ id_list_p pick_numa_nodes(int pid, int cpus, int mbs) {
         }
     }
 
+    // See if this proposed move will make a significant difference.
+    // If not, return null instead of advising move.
+    uint64_t target_magnitude = 0;
+    uint64_t existing_magnitude = 0;
+
+    int node_id = 0;
+    int num_existing_nodes = NUM_IDS_IN_LIST(existing_mems_list_p);
+    int num_target_nodes   = NUM_IDS_IN_LIST(target_node_list_p);
+#if 0
+    // FIXME: causes excessive growth
+    if (num_target_nodes > num_existing_nodes) {
+        goto try_memory_move_again;
+    }
+#endif
+    int n = num_existing_nodes + num_target_nodes;
+    while (n) {
+        if (ID_IS_IN_LIST(node_id, existing_mems_list_p)) {
+            existing_magnitude += saved_magnitude_for_node[node_id];
+            n -= 1;
+        }
+        if (ID_IS_IN_LIST(node_id, target_node_list_p)) {
+            target_magnitude += saved_magnitude_for_node[node_id];
+            n -= 1;
+        }
+        node_id += 1;
+    }
+
     char buf1[BUF_SIZE];
     char buf2[BUF_SIZE];
 
-advise_bind:
+    if (existing_magnitude > 0) {
+        uint64_t magnitude_change = ((target_magnitude - existing_magnitude) * 100) / existing_magnitude;
+        if (magnitude_change < 0) {
+            magnitude_change = -(magnitude_change);
+        }
+        if (magnitude_change <= IMPROVEMENT_THRESHOLD_PERCENT) {
+            // Not significant enough percentage change to do rebind
+            if (log_level >= LOG_DEBUG) {
+                str_from_id_list(buf1, BUF_SIZE, existing_mems_list_p);
+                str_from_id_list(buf2, BUF_SIZE, target_node_list_p);
+                numad_log(LOG_DEBUG, "Moving pid %d from nodes (%s) to nodes (%s) skipped as insignificant improvement: %ld percent.\n",
+                    pid, buf1, buf2, magnitude_change);
+            }
+            return NULL;
+        }
+    }
+
+try_memory_move_again:
 
     str_from_id_list(buf1, BUF_SIZE, existing_mems_list_p);
     str_from_id_list(buf2, BUF_SIZE, target_node_list_p);
-    numad_log(LOG_NOTICE, "Advising pid %d move from nodes (%s) to nodes (%s)\n", pid, buf1, buf2);
+    char *cmd_name = "(unknown)";
+    if ((p) && (p->comm)) {
+        cmd_name = p->comm;
+    }
+    numad_log(LOG_NOTICE, "Advising pid %d %s move from nodes (%s) to nodes (%s)\n", pid, cmd_name, buf1, buf2);
 
     return target_node_list_p;
 }
@@ -1664,8 +1889,8 @@ void show_processes(process_data_p *ptr, int nprocs) {
             }
             fclose(fs);
         }
-        fprintf(log_fs, "PID %d: MBs_used %ld, CPUs_used %ld, Threads %ld, Uptime %ld, Name: %s, Nodes: %s\n", 
-            p->pid, p->MBs_used, p->CPUs_used, p->num_threads, p->uptime, p->comm, buf);
+        fprintf(log_fs, "PID %d: MBs_used %ld, CPUs_used %ld, Magnitude %ld, Threads %ld, Uptime %ld, Name: %s, Nodes: %s\n", 
+            p->pid, p->MBs_used, p->CPUs_used, p->MBs_used * p->CPUs_used, p->num_threads, p->uptime, p->comm, buf);
         }
     fprintf(log_fs, "\n");
     fflush(log_fs);
@@ -1684,13 +1909,27 @@ int manage_loads() {
             pindex[nprocs++] = p;
         }
     }
-    // Sort index by amount of CPU used * amount of memory used.
-    // Not expecting a long list here.  So just use a simple sort.
+    // Sort index by amount of CPU used * amount of memory used.  Not expecting
+    // a long list here.  Use a simple sort -- however, sort into bins,
+    // treating values within 10% as aquivalent and random which comes first.
     for (int ij = 0;  (ij < nprocs);  ij++) {
         int best = ij;
         for (int ik = ij;  (ik < nprocs);  ik++) {
-            if ((pindex[ik]->CPUs_used * pindex[ik]->MBs_used)
-                <= (pindex[best]->CPUs_used * pindex[best]->MBs_used)) continue;
+            uint64_t   ik_mag = (pindex[  ik]->CPUs_used * pindex[  ik]->MBs_used);
+            uint64_t best_mag = (pindex[best]->CPUs_used * pindex[best]->MBs_used);
+            uint64_t  min_mag = ik_mag;
+            uint64_t diff_mag = best_mag - ik_mag;
+            if (diff_mag < 0) {
+                diff_mag = -(diff_mag);
+                min_mag = best_mag;
+            }
+            if ((diff_mag > 0) && (min_mag / diff_mag < 10)) {
+                // difference > 10 percent.  Use strict ordering
+                if (ik_mag <= best_mag) continue;
+            } else {
+                // difference within 10 percent.  Use random ordering
+                if (random() > (RAND_MAX / 2)) continue;
+            }
             best = ik;
         }
         if (best != ij) {
@@ -1711,19 +1950,21 @@ int manage_loads() {
         int mb_request  =  (p->MBs_used * 100) / target_utilization;
         int cpu_request = (p->CPUs_used * 100) / target_utilization;
         // Don't give a process more CPUs than it has threads
+        // FIXME: For guest VMs, should limit max to VCPU threads (and should
+        // maybe put VM IO threads in root cgroup).
         int thread_limit = p->num_threads * CPU_SCALE_FACTOR;
         if (cpu_request > thread_limit) {
             cpu_request = thread_limit;
         }
-        pthread_mutex_lock(&mutex);
+        pthread_mutex_lock(&node_info_mutex);
         id_list_p node_list_p = pick_numa_nodes(p->pid, cpu_request, mb_request);
         // FIXME: copy node_list_p to shorten mutex region?
         if ((node_list_p != NULL) && (bind_process_and_migrate_memory(p->pid, p->cpuset_name, node_list_p, NULL))) {
             // Shorten interval if actively moving processes
-            pthread_mutex_unlock(&mutex);
+            pthread_mutex_unlock(&node_info_mutex);
             return min_interval;
         }
-        pthread_mutex_unlock(&mutex);
+        pthread_mutex_unlock(&node_info_mutex);
     }
     // Return maximum interval if no process movement
     return max_interval;
@@ -1740,17 +1981,40 @@ void *set_dynamic_options(void *arg) {
         recv_msg(&msg);
         switch (msg.body.cmd) {
             case 'i': {
-                numad_log(LOG_NOTICE, "Changing interval to %d:%d\n", msg.body.arg1, msg.body.arg2);
                 min_interval = msg.body.arg1;
                 max_interval = msg.body.arg2;
                 if (max_interval <= 0) {
                     shut_down_numad();
                 }
+                numad_log(LOG_NOTICE, "Changing interval to %d:%d\n", msg.body.arg1, msg.body.arg2);
                 break;
             }
             case 'l': {
                 numad_log(LOG_NOTICE, "Changing log level to %d\n", msg.body.arg1);
                 log_level = msg.body.arg1;
+                break;
+            }
+            case 'p': {
+                numad_log(LOG_NOTICE, "Adding PID %d to explicit PID list\n", msg.body.arg1);
+                pthread_mutex_lock(&pid_list_mutex);
+                insert_pid_into_pid_list(msg.body.arg1);
+                pthread_mutex_unlock(&pid_list_mutex);
+                break;
+            }
+            case 'r': {
+                numad_log(LOG_NOTICE, "Removing PID %d from explicit PID list\n", msg.body.arg1);
+                pthread_mutex_lock(&pid_list_mutex);
+                remove_pid_from_pid_list(msg.body.arg1);
+                pthread_mutex_unlock(&pid_list_mutex);
+                break;
+            }
+            case 'S': {
+                scan_all_processes = (msg.body.arg1 != 0);
+                if (scan_all_processes) {
+                    numad_log(LOG_NOTICE, "Scanning all processes\n");
+                } else {
+                    numad_log(LOG_NOTICE, "Scanning only explicit PID list processes\n");
+                }
                 break;
             }
             case 'u': {
@@ -1761,10 +2025,11 @@ void *set_dynamic_options(void *arg) {
             case 'w': {
                 char buf[BUF_SIZE];
                 numad_log(LOG_NOTICE, "Getting NUMA pre-placement advice for %d CPUs and %d MBs\n", msg.body.arg1, msg.body.arg2);
-                pthread_mutex_lock(&mutex);
+                pthread_mutex_lock(&node_info_mutex);
+                int nodes = update_nodes();
                 id_list_p node_list_p = pick_numa_nodes(-1, (msg.body.arg1 * CPU_SCALE_FACTOR), msg.body.arg2);
                 str_from_id_list(buf, BUF_SIZE, node_list_p);
-                pthread_mutex_unlock(&mutex);
+                pthread_mutex_unlock(&node_info_mutex);
                 send_msg(msg.body.src_pid, 'w', requested_cpus, requested_mbs, buf);
                 break;
             }
@@ -1810,20 +2075,29 @@ void parse_two_arg_values(char *p, int *first_ptr, int *second_ptr, int first_is
 
 int main(int argc, char *argv[]) {
     int opt;
+    long list_pid;
     char *p = NULL;
+    int d_flag = 0;
     int i_flag = 0;
     int l_flag = 0;
+    int p_flag = 0;
+    int r_flag = 0;
+    int S_flag = 0;
     int u_flag = 0;
+    int v_flag = 0;
     int w_flag = 0;
-    while ((opt = getopt(argc, argv, "dD:hi:l:u:vVw:")) != -1) {
+    while ((opt = getopt(argc, argv, "dD:hi:l:p:r:S:u:vVw:")) != -1) {
 	switch (opt) {
-	    case 'd': log_level = LOG_DEBUG ; break;
+	    case 'd': d_flag = 1; log_level = LOG_DEBUG ; break;
 	    case 'D': cpuset_dir_list[0] = strdup(optarg); break;
 	    case 'h': print_usage_and_exit(argv[0]); break;
 	    case 'i': i_flag = 1; parse_two_arg_values(optarg, &min_interval, &max_interval, 1); break;
 	    case 'l': l_flag = 1; log_level = atoi(optarg); break;
+	    case 'p': p_flag = 1; list_pid = atol(optarg); insert_pid_into_pid_list(list_pid); break;
+	    case 'r': r_flag = 1; list_pid = atol(optarg); remove_pid_from_pid_list(list_pid); break;
+	    case 'S': S_flag = 1; scan_all_processes = (atoi(optarg) != 0); break;
 	    case 'u': u_flag = 1; target_utilization = atoi(optarg); break;
-	    case 'v': log_level = LOG_INFO; break;
+	    case 'v': v_flag = 1; log_level = LOG_INFO; break;
 	    case 'V': print_version_and_exit(argv[0]); break;
             case 'w': w_flag = 1; parse_two_arg_values(optarg, &requested_cpus, &requested_mbs, 0); break;
 	    default: print_usage_and_exit(argv[0]); break;
@@ -1832,6 +2106,12 @@ int main(int argc, char *argv[]) {
     if (argc > optind) {
 	fprintf(stderr, "Unexpected arg = %s\n", argv[optind]);
 	exit(EXIT_FAILURE);
+    }
+    if (i_flag) {
+        if ((max_interval < min_interval) && (max_interval != 0)) {
+            fprintf(stderr, "Max interval (%d) must be greater than min interval (%d)\n", max_interval, min_interval);
+            exit(EXIT_FAILURE);
+        }
     }
 
     open_log_file();
@@ -1849,8 +2129,17 @@ int main(int argc, char *argv[]) {
         if (i_flag) {
             send_msg(daemon_pid, 'i', min_interval, max_interval, "");
         }
-        if (l_flag) {
+        if (d_flag || l_flag || v_flag) {
             send_msg(daemon_pid, 'l', log_level, 0, "");
+        }
+        if (p_flag) {
+            send_msg(daemon_pid, 'p', list_pid, 0, "");
+        }
+        if (r_flag) {
+            send_msg(daemon_pid, 'r', list_pid, 0, "");
+        }
+        if (S_flag) {
+            send_msg(daemon_pid, 'S', scan_all_processes, 0, "");
         }
         if (u_flag) {
             send_msg(daemon_pid, 'u', target_utilization, 0, "");
@@ -1897,7 +2186,8 @@ int main(int argc, char *argv[]) {
         }
 
         // spawn thread to handle messages from subsequent invocation requests
-        pthread_mutex_init(&mutex, NULL);
+        pthread_mutex_init(&pid_list_mutex, NULL);
+        pthread_mutex_init(&node_info_mutex, NULL);
         pthread_attr_t attr;
         if (pthread_attr_init(&attr) != 0) {
             numad_log(LOG_CRIT, "pthread_attr_init failure\n");
@@ -1912,9 +2202,9 @@ int main(int argc, char *argv[]) {
         // Loop here forwever...
         for (;;) {
             int interval = max_interval;
-            pthread_mutex_lock(&mutex);
+            pthread_mutex_lock(&node_info_mutex);
             int nodes = update_nodes();
-            pthread_mutex_unlock(&mutex);
+            pthread_mutex_unlock(&node_info_mutex);
             if (nodes > 1) {
                 update_processes();
                 interval = manage_loads();
@@ -1925,7 +2215,8 @@ int main(int argc, char *argv[]) {
         if (pthread_attr_destroy(&attr) != 0) {
             numad_log(LOG_WARNING, "pthread_attr_destroy failure\n");
         }
-        pthread_mutex_destroy(&mutex);
+        pthread_mutex_destroy(&pid_list_mutex);
+        pthread_mutex_destroy(&node_info_mutex);
     }
 
     exit(EXIT_SUCCESS);
