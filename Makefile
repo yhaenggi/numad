@@ -31,7 +31,7 @@ docdir := ${prefix}/share/doc
 
 all: numad
 
-numad: numad.o
+numad: numad.o -lpthread
 
 AR ?= ar
 RANLIB ?= ranlib
