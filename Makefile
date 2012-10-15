@@ -22,7 +22,7 @@ ifeq ($(THREAD_SUPPORT),yes)
 	BENCH_CFLAGS += -ftree-vectorize
 endif
 
-CLEANFILES := numad.o numad .depend .depend.X
+CLEANFILES := numad.o numad .depend .depend.X empty.c empty.o
 
 SOURCES := numad.c
 
@@ -31,7 +31,7 @@ docdir := ${prefix}/share/doc
 
 all: numad
 
-numad: numad.o -lpthread
+numad: numad.o -lpthread -lrt
 
 AR ?= ar
 RANLIB ?= ranlib
@@ -42,6 +42,7 @@ RANLIB ?= ranlib
 
 install: numad
 	mkdir -p ${prefix}/bin
+	mkdir -p ${prefix}/share/man/man8
 	install -m 0755 numad ${prefix}/bin
 	install -m 0644 numad.8 ${prefix}/share/man/man8
 
@@ -61,5 +62,4 @@ depend: .depend
 include .depend
 
 Makefile: .depend
-
 
