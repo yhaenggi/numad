@@ -1,7 +1,8 @@
 .TH "numad" "8" "1.0.0" "Bill Gray" "Administration"
 .SH "numad"
 .LP 
-numad \- A user\-level daemon that provides advice and managment for optimum use of CPUs and memory on systems with NUMA topology.
+numad \- A user\-level daemon that provides placement advice and process
+management for efficient use of CPUs and memory on systems with NUMA topology.
 .SH "SYNTAX"
 .LP 
 numad [\fI\-dhvV\fP]
@@ -11,6 +12,9 @@ numad  [\fI\-D non-standard-cgroup-mount-point\fP]
 .br 
 .LP 
 numad  [\fI\-i [min_interval:]max_interval\fP]
+.br 
+.LP 
+numad  [\fI\-K 0|1\fP]
 .br 
 .LP 
 numad  [\fI\-l log_level\fP]
@@ -36,11 +40,18 @@ numad  [\fI\-x PID\fP]
 
 .SH "DESCRIPTION"
 .LP 
-Numad is a system daemon that monitors NUMA topology and usage. It will attempt
-to locate processes for optimum NUMA locality and affinity, dynamically
-adjusting to changing system conditions. Numad also provides guidance to assist
-management applications with initial manual binding of CPU and memory resources
-for their processes.
+Numad is a system daemon that monitors NUMA topology and resource usage. It
+will attempt to locate processes for efficient NUMA locality and affinity,
+dynamically adjusting to changing system conditions.  Numad also provides
+guidance to assist management applications with initial manual binding of CPU
+and memory resources for their processes.  Note that numad is primarily
+intended for server consolidation environments, where there might be multiple
+applications or multiple virtual guests running on the same server system.
+Numad is most likely to have a positive effect when processes can be localized
+in a subset of the system's NUMA nodes.  If the entire system is dedicated to a
+large in-memory database application, for example -- especially if memory
+accesses will likely remain unpredictable -- numad will probably not improve
+performance.
 .SH "OPTIONS"
 .LP 
 .TP 
@@ -61,6 +72,16 @@ Sets the time interval that numad waits between system scans, in seconds to
 cause the daemon to exit.  (This is the normal mechanism to terminate the
 daemon.)  A bigger <\fImax_interval\fP> will decrease numad overhead but also
 decrease responsiveness to changing loads.
+.TP
+\fB\-K\fR <\fI0|1\fP>
+This option controls whether numad keeps interleaved memory spread across NUMA
+nodes, or attempts to merge interleaved memory to local NUMA nodes.  The
+default is to merge interleaved memory.  This is the appropriate setting to
+localize processes in a subset of the system's NUMA nodes.  If you are running
+a large, single-instance application that allocates interleaved memory because
+the workload will have continuous unpredictable memory access patterns (e.g. a
+large in-memory database), you might get better results by specifying \fI\-K
+1\fP to instruct numad to keep interleaved memory distributed.
 .TP 
 \fB\-l\fR <\fIlog_level\fP>
 Sets the log level to <\fIlog_level\fP>.  Reasonable choices are 5, 6, or 7.
@@ -69,15 +90,15 @@ The default value is 5.
 \fB\-p\fR <\fIPID\fP>
 Add PID to explicit inclusion list of processes to consider for managing, if
 the process also uses significant resources.  Multiple \fI\-p PID\fP options
-can be specified at daemon start, but after deamon start, only one PID can be
+can be specified at daemon start, but after daemon start, only one PID can be
 added to the inclusion list per subsequent numad invocation.  Use with \-S to
 precisely control the scope of processes numad can manage.  Note that the
 specified process will not necessarily be actively managed unless it also meets
-numad's significance threshold -- which is currently 300MB and half a CPU.
+numad's significance threshold -- which is currently 300MB and half of a CPU.
 .TP
 \fB\-r\fR <\fIPID\fP>
 Remove PID from both the explicit inclusion and the exclusion lists of
-processes.  After deamon start, only one PID can be removed from the explicit
+processes.  After daemon start, only one PID can be removed from the explicit
 process lists per subsequent numad invocation.  Use with \-S and \-p and \-x to
 precisely control the scope of processes numad can manage.
 .TP
@@ -110,7 +131,7 @@ Queries numad for the best NUMA nodes to bind an entity that needs
 be specified as well <\fI:MB\fP> so numad can recommend NUMA nodes with
 available CPU capacity and adequate free memory.  This query option can be used
 regardless of whether numad is running as a daemon.  (An invocation using this
-option when numad is not running as a daemon, will not cause the deamon to
+option when numad is not running as a daemon, will not cause the daemon to
 start.) Output of this option is a string that contains a NUMA node list.  For
 example: 2\-3,6.  The recommended node list could be saved in a shell variable
 (e.g., NODES) and then used as the node list parameter in a
@@ -122,7 +143,7 @@ command.  See numactl(8).
 \fB\-x\fR <\fIPID\fP>
 Add PID to explicit exclusion list of processes to blacklist from managing.
 Multiple \fI\-x PID\fP options can be specified at daemon start, but after
-deamon start, only one PID can be added to the exclusion list per subsequent
+daemon start, only one PID can be added to the exclusion list per subsequent
 numad invocation.  Use with \-S to precisely control the scope of processes
 numad can manage.  
 .SH "FILES"
