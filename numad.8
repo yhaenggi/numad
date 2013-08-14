@@ -11,6 +11,9 @@ numad [\fI\-dhvV\fP]
 numad  [\fI\-D non-standard-cgroup-mount-point\fP]
 .br 
 .LP 
+numad  [\fI\-H THP_hugepage_scan_sleep_ms\fP]
+.br 
+.LP 
 numad  [\fI\-i [min_interval:]max_interval\fP]
 .br 
 .LP 
@@ -26,6 +29,9 @@ numad  [\fI\-p PID\fP]
 numad  [\fI\-r PID\fP]
 .br 
 .LP 
+numad  [\fI\-R reserved-CPU-list\fP]
+.br 
+.LP 
 numad  [\fI\-S 0|1\fP]
 .br 
 .LP 
@@ -37,7 +43,6 @@ numad  [\fI\-w NCPUS[:MB]\fP]
 .LP 
 numad  [\fI\-x PID\fP]
 .br 
-
 .SH "DESCRIPTION"
 .LP 
 Numad is a system daemon that monitors NUMA topology and resource usage. It
@@ -64,6 +69,15 @@ numad.  This is not normally necessary.
 .TP 
 \fB\-h\fR
 Display usage help information and then exit.
+.TP 
+\fB\-H\fR  <\fITHP_scan_sleep_ms\fP>
+Set the desired transparent hugepage scan interval in ms.  The
+/sys/kernel/mm/tranparent_hugepage/khugepaged/scan_sleep_millisecs tunable is
+usually set to 10000ms by the operating system.  The default is changed by
+numad to be 1000ms, since it is helpful for the hugepage daemon to be more
+aggressive when memory moves between nodes.  If you don't like numad's choice
+of 1000ms, you can make the hugepage daemon more or less aggressive by
+specifying an alternate value with this option.
 .TP 
 \fB\-i\fR <\fI[min_interval:]max_interval\fP>
 Sets the time interval that numad waits between system scans, in seconds to
@@ -101,6 +115,12 @@ Remove PID from both the explicit inclusion and the exclusion lists of
 processes.  After daemon start, only one PID can be removed from the explicit
 process lists per subsequent numad invocation.  Use with \-S and \-p and \-x to
 precisely control the scope of processes numad can manage.
+.TP
+\fB\-R\fR <\fICPU_LIST\fP>
+Specify a list of CPUs that numad should assume are reserved for non-numad use.
+No processes will be bound to the specified CPUs by numad.  This option is
+effective only when starting numad.  You cannot change reserved CPUs
+dynamically while numad is already running.
 .TP
 \fB\-S\fR <\fI0|1\fP>
 This option controls whether numad scans all system processes or only the
@@ -159,14 +179,18 @@ numad can manage.
 None.
 .SH "EXAMPLES"
 .LP 
-Numad is normally run as a system daemon and should be managed by the 
+Numad can be run as a system daemon and can be managed by the 
 standard init mechanisms of the host.
 .LP  
 If interactive (manual) control is desired, you can start the daemon manually by typing:
 .LP 
 /usr/bin/numad
 .LP
-Subsequent numad invocations while the daemon is running can be used to dynamically change run-time options.
+Subsequent numad invocations while the daemon is running can be used to dynamically change most run-time options.
+.LP
+You can terminate numad from running by typing:
+.LP 
+/usr/bin/numad -i0
 .SH "AUTHORS"
 .LP 
 Bill Gray <bgray@redhat.com>

@@ -1,0 +1,8 @@
+/var/log/numad.log {
+    compress
+    copytruncate
+    maxage 60
+    missingok
+    rotate 5
+    size 1M
+}
