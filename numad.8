@@ -8,6 +8,9 @@ management for efficient use of CPUs and memory on systems with NUMA topology.
 numad [\fI\-dhvV\fP]
 .br 
 .LP 
+numad  [\fI\-C 0|1\fP]
+.br 
+.LP 
 numad  [\fI\-D non-standard-cgroup-mount-point\fP]
 .br 
 .LP 
@@ -35,6 +38,9 @@ numad  [\fI\-R reserved-CPU-list\fP]
 numad  [\fI\-S 0|1\fP]
 .br 
 .LP 
+numad  [\fI\-t logical_CPU_percent\fP]
+.br 
+.LP 
 numad  [\fI\-u target_utilization\fP]
 .br 
 .LP 
@@ -59,6 +65,13 @@ accesses will likely remain unpredictable -- numad will probably not improve
 performance.
 .SH "OPTIONS"
 .LP 
+.TP
+\fB\-C\fR <\fI0|1\fP>
+This option controls whether or not numad treats inactive file cache as
+available memory. By default, numad assumes it can count inactive file cache as
+"free" memory when considering resources to match with processes.  Specify
+\fI\-C 0\fP if numad should instead consider inactive file cache as a consumed
+resource.
 .TP 
 \fB\-d\fR
 Debug output in log, sets the log level to LOG_DEBUG.  Same effect as \fI\-l 7\fP.
@@ -74,10 +87,11 @@ Display usage help information and then exit.
 Set the desired transparent hugepage scan interval in ms.  The
 /sys/kernel/mm/tranparent_hugepage/khugepaged/scan_sleep_millisecs tunable is
 usually set to 10000ms by the operating system.  The default is changed by
-numad to be 1000ms, since it is helpful for the hugepage daemon to be more
+numad to be 1000ms since it is helpful for the hugepage daemon to be more
 aggressive when memory moves between nodes.  If you don't like numad's choice
 of 1000ms, you can make the hugepage daemon more or less aggressive by
-specifying an alternate value with this option.
+specifying an alternate value with this option.  Setting this value to 100ms
+might improve some workloads which use many transparent hugepages.
 .TP 
 \fB\-i\fR <\fI[min_interval:]max_interval\fP>
 Sets the time interval that numad waits between system scans, in seconds to
@@ -99,7 +113,9 @@ large in-memory database), you might get better results by specifying \fI\-K
 .TP 
 \fB\-l\fR <\fIlog_level\fP>
 Sets the log level to <\fIlog_level\fP>.  Reasonable choices are 5, 6, or 7.
-The default value is 5.
+The default value is 5.  Note that CPU values are scaled by a factor of 100
+internally and in the numad log files.  Unfortunately, you don't actually have
+that many CPUs.
 .TP
 \fB\-p\fR <\fIPID\fP>
 Add PID to explicit inclusion list of processes to consider for managing, if
@@ -134,10 +150,19 @@ exclusion list).  Starting numad as
 will limit scanning, and thus also automatic NUMA management, to only those
 three explicitly specified processes.
 .TP 
+\fB\-t\fR  <\fIlogical_CPU_percent\fP>
+Determine the resource value of logical CPUs.  Hardware threads typically share
+most core resources, and so add only a fraction of CPU power for many
+workloads.  By default numad considers logical CPUs to be only 20 percent of a
+dedicated core.
+.TP 
 \fB\-u\fR  <\fItarget_utilization\fP>
 Set the desired maximum consumption percentage of a node. Default is 85%.
 Decrease the target value to maintain more available resource margin on each
 node.  Increase the target value to more exhaustively consume node resources.
+It is possible to specify values up to 130 percent, to oversubscribe CPUs in
+the nodes, but memory utilization is capped at 100%.  Use oversubscription
+values carefully.
 .TP 
 \fB\-v\fR
 Verbose output in log, sets the log level to LOG_INFO.  Same effect as \fI\-l 6\fP.
@@ -197,4 +222,3 @@ Bill Gray <bgray@redhat.com>
 .SH "SEE ALSO"
 .LP 
 numactl(8)
-
