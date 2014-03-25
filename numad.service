@@ -1,11 +1,10 @@
 [Unit]
 Description=numad - The NUMA daemon that manages application locality.
-After=syslog.target
+Documentation=man:numad
 
 [Service]
 Type=forking
-EnvironmentFile=/etc/numad.conf
-ExecStart=/usr/bin/numad -i $INTERVAL
+ExecStart=/usr/bin/numad -i 15
 
 [Install]
 WantedBy=multi-user.target
