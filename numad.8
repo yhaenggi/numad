@@ -1,56 +1,59 @@
 .TH "numad" "8" "1.0.0" "Bill Gray" "Administration"
-.SH "numad"
-.LP 
+.SH "NAME"
+.LP
 numad \- A user\-level daemon that provides placement advice and process
 management for efficient use of CPUs and memory on systems with NUMA topology.
-.SH "SYNTAX"
-.LP 
+.SH "SYNOPSIS"
+.LP
 numad [\fI\-dhvV\fP]
-.br 
-.LP 
+.br
+.LP
 numad  [\fI\-C 0|1\fP]
-.br 
-.LP 
+.br
+.LP
 numad  [\fI\-D non-standard-cgroup-mount-point\fP]
-.br 
-.LP 
+.br
+.LP
 numad  [\fI\-H THP_hugepage_scan_sleep_ms\fP]
-.br 
-.LP 
+.br
+.LP
 numad  [\fI\-i [min_interval:]max_interval\fP]
-.br 
-.LP 
+.br
+.LP
 numad  [\fI\-K 0|1\fP]
-.br 
-.LP 
+.br
+.LP
 numad  [\fI\-l log_level\fP]
-.br 
-.LP 
+.br
+.LP
+numad  [\fI\-m target_memory_locality\fP]
+.br
+.LP
 numad  [\fI\-p PID\fP]
-.br 
-.LP 
+.br
+.LP
 numad  [\fI\-r PID\fP]
-.br 
-.LP 
+.br
+.LP
 numad  [\fI\-R reserved-CPU-list\fP]
-.br 
-.LP 
+.br
+.LP
 numad  [\fI\-S 0|1\fP]
-.br 
-.LP 
+.br
+.LP
 numad  [\fI\-t logical_CPU_percent\fP]
-.br 
-.LP 
+.br
+.LP
 numad  [\fI\-u target_utilization\fP]
-.br 
-.LP 
+.br
+.LP
 numad  [\fI\-w NCPUS[:MB]\fP]
-.br 
-.LP 
+.br
+.LP
 numad  [\fI\-x PID\fP]
-.br 
+.br
 .SH "DESCRIPTION"
-.LP 
+.LP
 Numad is a system daemon that monitors NUMA topology and resource usage. It
 will attempt to locate processes for efficient NUMA locality and affinity,
 dynamically adjusting to changing system conditions.  Numad also provides
@@ -64,7 +67,7 @@ large in-memory database application, for example -- especially if memory
 accesses will likely remain unpredictable -- numad will probably not improve
 performance.
 .SH "OPTIONS"
-.LP 
+.LP
 .TP
 \fB\-C\fR <\fI0|1\fP>
 This option controls whether or not numad treats inactive file cache as
@@ -72,34 +75,36 @@ available memory. By default, numad assumes it can count inactive file cache as
 "free" memory when considering resources to match with processes.  Specify
 \fI\-C 0\fP if numad should instead consider inactive file cache as a consumed
 resource.
-.TP 
+.TP
 \fB\-d\fR
 Debug output in log, sets the log level to LOG_DEBUG.  Same effect as \fI\-l 7\fP.
 .TP
 \fB\-D\fR <\fInon-standard-cgroup-mount-point\fP>
 This option can be used to communicate a non-standard cgroup mount point to
 numad.  This is not normally necessary.
-.TP 
+.TP
 \fB\-h\fR
 Display usage help information and then exit.
-.TP 
+.TP
 \fB\-H\fR  <\fITHP_scan_sleep_ms\fP>
 Set the desired transparent hugepage scan interval in ms.  The
 /sys/kernel/mm/tranparent_hugepage/khugepaged/scan_sleep_millisecs tunable is
 usually set to 10000ms by the operating system.  The default is changed by
 numad to be 1000ms since it is helpful for the hugepage daemon to be more
-aggressive when memory moves between nodes.  If you don't like numad's choice
-of 1000ms, you can make the hugepage daemon more or less aggressive by
-specifying an alternate value with this option.  Setting this value to 100ms
-might improve some workloads which use many transparent hugepages.
-.TP 
+aggressive when memory moves between nodes.  Specifying (\fI\-H 0\fP) will
+cause numad to retain the system default value.  You can also make the hugepage
+daemon more or less aggressive by specifying an alternate value with this
+option.  For example, setting this value to 100ms (\fI\-H 100\fP) might improve
+the performance of workloads which use many transparent hugepages.
+.TP
 \fB\-i\fR <\fI[min_interval:]max_interval\fP>
 Sets the time interval that numad waits between system scans, in seconds to
 <\fImax_interval\fP>. Default <\fImax_interval\fP> is 15 seconds, default
 <\fImin_interval\fP> is 5 seconds.  Setting a <\fImax_interval\fP> of zero will
 cause the daemon to exit.  (This is the normal mechanism to terminate the
 daemon.)  A bigger <\fImax_interval\fP> will decrease numad overhead but also
-decrease responsiveness to changing loads.
+decrease responsiveness to changing loads.  The default numad max_interval can
+be changed in the numad.conf file.
 .TP
 \fB\-K\fR <\fI0|1\fP>
 This option controls whether numad keeps interleaved memory spread across NUMA
@@ -110,12 +115,24 @@ a large, single-instance application that allocates interleaved memory because
 the workload will have continuous unpredictable memory access patterns (e.g. a
 large in-memory database), you might get better results by specifying \fI\-K
 1\fP to instruct numad to keep interleaved memory distributed.
-.TP 
+.TP
 \fB\-l\fR <\fIlog_level\fP>
 Sets the log level to <\fIlog_level\fP>.  Reasonable choices are 5, 6, or 7.
 The default value is 5.  Note that CPU values are scaled by a factor of 100
 internally and in the numad log files.  Unfortunately, you don't actually have
 that many CPUs.
+.TP
+\fB\-m\fR  <\fItarget_memory_locality\fP>
+Set the desired memory locality threshold to stop moving process memory.  Numad
+might stop retrying to coalesce process memory when more than this percentage
+of the process's memory is already localized in the target node(s).  The
+default is 90%. Numad will frequently localize more than the localization
+threshold percent, but it will not necessarily do so.  Decrease the threshold
+to allow numad to leave more process memory distributed on various nodes.
+Increase the threshold to instruct numad to try to localize more memory.
+Acceptable values are between 50 and 100 percent.  Note that setting the target
+memory locality to 100% might cause numad to continually retry to move memory
+that the kernel will never succesfully move.
 .TP
 \fB\-p\fR <\fIPID\fP>
 Add PID to explicit inclusion list of processes to consider for managing, if
@@ -149,27 +166,30 @@ exclusion list).  Starting numad as
 .br
 will limit scanning, and thus also automatic NUMA management, to only those
 three explicitly specified processes.
-.TP 
+.TP
 \fB\-t\fR  <\fIlogical_CPU_percent\fP>
-Determine the resource value of logical CPUs.  Hardware threads typically share
-most core resources, and so add only a fraction of CPU power for many
-workloads.  By default numad considers logical CPUs to be only 20 percent of a
-dedicated core.
-.TP 
+Specify the resource value of logical CPUs.  Hardware threads typically share
+most core resources, and so logical CPUs add only a fraction of CPU power for
+many workloads.  By default numad considers logical CPUs to be only 20 percent
+of a dedicated hardware core.
+.TP
 \fB\-u\fR  <\fItarget_utilization\fP>
 Set the desired maximum consumption percentage of a node. Default is 85%.
 Decrease the target value to maintain more available resource margin on each
 node.  Increase the target value to more exhaustively consume node resources.
-It is possible to specify values up to 130 percent, to oversubscribe CPUs in
-the nodes, but memory utilization is capped at 100%.  Use oversubscription
-values carefully.
-.TP 
+If you have sized your workloads to precisely fit inside a NUMA node,
+specifying (\fI\-u 100\fP) might improve system performance by telling numad to
+go ahead and consume all the resources in each node.  It is possible to specify
+values up to 130 percent to oversubscribe CPUs in the nodes, but memory
+utilization is always capped at 100%.  Use oversubscription values very
+carefully.
+.TP
 \fB\-v\fR
 Verbose output in log, sets the log level to LOG_INFO.  Same effect as \fI\-l 6\fP.
-.TP 
+.TP
 \fB\-V\fR
 Display version information and exit.
-.TP 
+.TP
 \fB\-w\fR <\fINCPUS[:MB]\fP>
 Queries numad for the best NUMA nodes to bind an entity that needs
 <\fINCPUS\fP>.  The amount of memory (in MBs) is optional, but should normally
@@ -190,35 +210,37 @@ Add PID to explicit exclusion list of processes to blacklist from managing.
 Multiple \fI\-x PID\fP options can be specified at daemon start, but after
 daemon start, only one PID can be added to the exclusion list per subsequent
 numad invocation.  Use with \-S to precisely control the scope of processes
-numad can manage.  
+numad can manage.
 .SH "FILES"
-.LP 
-\fI/usr/bin/numad\fP 
-.br 
-\fI/var/log/numad.log\fP 
-.br 
-\fI/var/run/numad.pid\fP 
+.LP
+\fI/usr/bin/numad\fP
+.br
+\fI/etc/numad.conf\fP
+.br
+\fI/var/log/numad.log\fP
+.br
+\fI/var/run/numad.pid\fP
 .SH "ENVIRONMENT VARIABLES"
-.LP 
-.TP 
+.LP
+.TP
 None.
 .SH "EXAMPLES"
-.LP 
-Numad can be run as a system daemon and can be managed by the 
+.LP
+Numad can be run as a system daemon and can be managed by the
 standard init mechanisms of the host.
-.LP  
+.LP
 If interactive (manual) control is desired, you can start the daemon manually by typing:
-.LP 
+.LP
 /usr/bin/numad
 .LP
 Subsequent numad invocations while the daemon is running can be used to dynamically change most run-time options.
 .LP
 You can terminate numad from running by typing:
-.LP 
+.LP
 /usr/bin/numad -i0
 .SH "AUTHORS"
-.LP 
+.LP
 Bill Gray <bgray@redhat.com>
 .SH "SEE ALSO"
-.LP 
+.LP
 numactl(8)

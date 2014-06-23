@@ -54,7 +54,7 @@ Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
 #include <values.h>
 
 
-#define VERSION_STRING "20140225"
+#define VERSION_STRING "20140620"
 
 
 #define VAR_RUN_FILE "/var/run/numad.pid"
@@ -86,9 +86,10 @@ char *cpuset_dir_list[] =  {
 #define MAX_INTERVAL 15
 #define CPU_THRESHOLD     50
 #define MEMORY_THRESHOLD 300
-#define THP_SCAN_SLEEP_MS 1000
-#define TARGET_UTILIZATION_PERCENT 85
 #define DEFAULT_HTT_PERCENT 20
+#define DEFAULT_THP_SCAN_SLEEP_MS 1000
+#define DEFAULT_UTILIZATION_PERCENT 85
+#define DEFAULT_MEMLOCALITY_PERCENT 90
 
 
 #define CONVERT_DIGITS_TO_NUM(p, n) \
@@ -104,12 +105,13 @@ int num_nodes = 0;
 int threads_per_core = 0;
 int page_size_in_bytes = 0;
 int huge_page_size_in_bytes = 0;
-int thp_scan_sleep_ms = THP_SCAN_SLEEP_MS;
 
 int min_interval = MIN_INTERVAL;
 int max_interval = MAX_INTERVAL;
 int htt_percent = DEFAULT_HTT_PERCENT;
-int target_utilization  = TARGET_UTILIZATION_PERCENT;
+int thp_scan_sleep_ms = DEFAULT_THP_SCAN_SLEEP_MS;
+int target_utilization  = DEFAULT_UTILIZATION_PERCENT;
+int target_memlocality  = DEFAULT_MEMLOCALITY_PERCENT;
 int scan_all_processes = 1;
 int keep_interleaved_memory = 0;
 int use_inactive_file_cache = 1;
@@ -790,18 +792,19 @@ void print_usage_and_exit(char *prog_name) {
     fprintf(stderr, "-d for debug logging (same effect as '-l 7')\n");
     fprintf(stderr, "-D <CGROUP_MOUNT_POINT> to specify cgroup mount point\n");
     fprintf(stderr, "-h to print this usage info\n");
-    fprintf(stderr, "-H <N> to set THP scan_sleep_ms (default 1000)\n");
+    fprintf(stderr, "-H <N> to set THP scan_sleep_ms (default %d)\n", DEFAULT_THP_SCAN_SLEEP_MS);
     fprintf(stderr, "-i [<MIN>:]<MAX> to specify interval seconds\n");
     fprintf(stderr, "-K 1  to keep interleaved memory spread across nodes (default 0)\n");
     fprintf(stderr, "-K 0  to merge interleaved memory to local NUMA nodes (default 0)\n");
     fprintf(stderr, "-l <N> to specify logging level (usually 5, 6, or 7 -- default 5)\n");
+    fprintf(stderr, "-m <N> to specify memory locality target percent (default %d)\n", DEFAULT_MEMLOCALITY_PERCENT);
     fprintf(stderr, "-p <PID> to add PID to inclusion pid list\n");
     fprintf(stderr, "-r <PID> to remove PID from explicit pid lists\n");
     fprintf(stderr, "-R <CPU_LIST> to reserve some CPUs for non-numad use\n");
     fprintf(stderr, "-S 1  to scan all processes (default 1)\n");
     fprintf(stderr, "-S 0  to scan only explicit PID list processes (default 1)\n");
-    fprintf(stderr, "-t <N> to specify thread / logical CPU percent (default 20)\n");
-    fprintf(stderr, "-u <N> to specify target utilization percent (default 85)\n");
+    fprintf(stderr, "-t <N> to specify thread / logical CPU valuation percent (default %d)\n", DEFAULT_HTT_PERCENT);
+    fprintf(stderr, "-u <N> to specify utilization target percent (default %d)\n", DEFAULT_UTILIZATION_PERCENT);
     fprintf(stderr, "-v for verbose  (same effect as '-l 6')\n");
     fprintf(stderr, "-V to show version info\n");
     fprintf(stderr, "-w <CPUs>[:<MBs>] for NUMA node suggestions\n");
@@ -1069,6 +1072,36 @@ static int name_starts_with_digit(const struct dirent *dptr) {
 }
 
 
+char *mystrdup(char *s) {
+    static int str_buf_pos = 0;
+    static int str_buf_size = 0;
+    static char *str_buf = NULL;
+    if (s == NULL) {
+        // NULL string means throw away all previously saved strings...
+        str_buf_pos = 0;
+        return NULL;
+    }
+    int s_len = strlen(s);
+    if (str_buf_pos + s_len + 1 >= str_buf_size) {
+        // Need to expand buffer space
+        if (str_buf_size == 0) {
+            str_buf_size = 4096;
+        } else {
+            str_buf_size *= 2;
+        }
+        str_buf = realloc(str_buf, str_buf_size);
+        if (str_buf == NULL) {
+            numad_log(LOG_CRIT, "realloc failed\n");
+            exit(EXIT_FAILURE);
+        }
+    }
+    char *p = &str_buf[str_buf_pos];
+    memcpy(p, s, s_len + 1);
+    str_buf_pos += s_len + 1;
+    return p;
+}
+
+
 int write_to_cpuset_file(char *fname, char *s) {
     int fd = open(fname, O_WRONLY | O_TRUNC, 0);
     if (fd == -1) {
@@ -1084,25 +1117,8 @@ int write_to_cpuset_file(char *fname, char *s) {
     return 0;
 }
 
-int configure_cpuset(char *cpuset_name, char *node_list_str, char *cpu_list_str) {
-    int rc = 0;
-    char fname[FNAME_SIZE];
-    // Write "1" out to cpuset.memory_migrate file
-    snprintf(fname, FNAME_SIZE, "%s/cpuset.memory_migrate", cpuset_name);
-    rc += write_to_cpuset_file(fname, "1");
-    // For memory binding, write node IDs out to cpuset.mems file
-    snprintf(fname, FNAME_SIZE, "%s/cpuset.mems", cpuset_name);
-    rc += write_to_cpuset_file(fname, node_list_str);
-    // For CPU binding, write CPU IDs out to cpuset.cpus file
-    snprintf(fname, FNAME_SIZE, "%s/cpuset.cpus", cpuset_name);
-    rc += write_to_cpuset_file(fname, cpu_list_str);
-    return rc;
-}
 
 int bind_process_and_migrate_memory(process_data_p p) {
-    char buf[BUF_SIZE];
-    char fname[FNAME_SIZE];
-    char pid_cpuset_name[FNAME_SIZE];
     uint64_t t0 = get_time_stamp();
     // Parameter p is a pointer to an element in the hash table
     if ((!p) || (p->pid < 1)) {
@@ -1113,67 +1129,8 @@ int bind_process_and_migrate_memory(process_data_p p) {
         numad_log(LOG_CRIT, "Cannot bind to unspecified node(s)\n");
         exit(EXIT_FAILURE);
     }
-    // Get cpuset name for this PID, or make a new cpuset if necessary
-    snprintf(fname, FNAME_SIZE, "/proc/%d/cpuset", p->pid);
-    if (read_one_line(buf, BUF_SIZE, fname) <= 0) {
-        numad_log(LOG_WARNING, "Could not get cpuset of PID %d.\n", p->pid);
-        return 0;  // Assume the process terminated
-    }
-    if (!strcmp(buf, "/")) {
-        // Default cpuset name, so make a new cpuset directory for this PID
-        snprintf(pid_cpuset_name, FNAME_SIZE, "%s/numad.%d", cpuset_dir, p->pid);
-        numad_log(LOG_NOTICE, "Making new cpuset: %s\n", pid_cpuset_name);
-        if (mkdir(pid_cpuset_name, S_IRWXU | S_IRWXG | S_IROTH | S_IXOTH) < 0) {
-            numad_log(LOG_CRIT, "Bad cpuset mkdir -- errno: %d\n", errno);
-            return 0;
-        }
-        // Temporarily enable all CPUs for a new cpuset...
-        char all_cpus_list_buf[BUF_SIZE];
-        str_from_id_list(all_cpus_list_buf, BUF_SIZE, all_cpus_list_p);
-        // Write CPU IDs out to cpuset.cpus file for CPU binding of main PID
-        snprintf(fname, FNAME_SIZE, "%s/cpuset.cpus", pid_cpuset_name);
-        if (write_to_cpuset_file(fname, all_cpus_list_buf) < 0) {
-            numad_log(LOG_CRIT, "Could not configure cpuset.cpus: %s\n", pid_cpuset_name);
-            return 0;  // Assume the process terminated
-        }
-    } else {
-        // Save the existing nondefault cpuset name for this PID
-        snprintf(pid_cpuset_name, FNAME_SIZE, "%s%s", cpuset_dir, buf);
-    }
-    // Configure the main PID cpuset with desired nodes and memory migrate
-    // flag.  Defer the CPU binding for the main PID until after the PID is
-    // actually written to the task file and the memory has been moved.
-    char node_list_buf[BUF_SIZE];
-    str_from_id_list(node_list_buf, BUF_SIZE, p->node_list_p);
-    // Write "1" out to cpuset.memory_migrate file
-    snprintf(fname, FNAME_SIZE, "%s/cpuset.memory_migrate", pid_cpuset_name);
-    if (write_to_cpuset_file(fname, "1") < 0) {
-        numad_log(LOG_CRIT, "Could not configure cpuset: %s\n", pid_cpuset_name);
-        return 0;  // Assume the process terminated
-    }
-    // For memory binding, write node IDs out to cpuset.mems file
-    snprintf(fname, FNAME_SIZE, "%s/cpuset.mems", pid_cpuset_name);
-    if (write_to_cpuset_file(fname, node_list_buf) < 0) {
-        numad_log(LOG_CRIT, "Could not configure cpuset: %s\n", pid_cpuset_name);
-        return 0;  // Assume the process terminated
-    }
-    // Open the main PID cpuset tasks file and
-    // bind the main PID in the main cpuset now.
-    snprintf(fname, FNAME_SIZE, "%s/tasks", pid_cpuset_name);
-    int fd = open(fname, O_WRONLY | O_TRUNC, 0);
-    if (fd < 0) {
-        numad_log(LOG_CRIT, "Could not open %s -- errno: %d\n", fname, errno);
-        return 0;  // Assume the process terminated
-    }
-    numad_log(LOG_NOTICE, "Including PID: %d in cpuset: %s\n", p->pid, pid_cpuset_name);
-    char pid_str[FNAME_SIZE];
-    snprintf(pid_str, FNAME_SIZE, "%d", p->pid);
-    if (write(fd, pid_str, strlen(pid_str)) <= 0) {
-        numad_log(LOG_CRIT, "Could not write %s to cpuset: %s -- errno: %d\n", pid_str, pid_cpuset_name, errno);
-        close(fd);
-        return 0;  // Assume the process terminated
-    }
-    // Generate CPU binding list derived from node bind list.
+    // Generate cpu list string derived from target node list.
+    char cpu_list_str[BUF_SIZE];
     static id_list_p cpu_bind_list_p;
     CLEAR_CPU_LIST(cpu_bind_list_p);
     int nodes = NUM_IDS_IN_LIST(p->node_list_p);
@@ -1185,107 +1142,131 @@ int bind_process_and_migrate_memory(process_data_p p) {
         }
         node_id += 1;
     }
-    char cpu_bind_list_buf[BUF_SIZE];
-    str_from_id_list(cpu_bind_list_buf, BUF_SIZE, cpu_bind_list_p);
-    // Write CPU IDs out to cpuset.cpus file for CPU binding of main PID
-    snprintf(fname, FNAME_SIZE, "%s/cpuset.cpus", pid_cpuset_name);
-    if (write_to_cpuset_file(fname, cpu_bind_list_buf) < 0) {
-        numad_log(LOG_CRIT, "Could not configure cpuset: %s\n", pid_cpuset_name);
-        return 0;  // Assume the process terminated
-    }
-    // Leave fd open in case process is multithreaded and we need to write more
-    // (sub) task IDs there.  In case multithreaded, make sure all the subtasks
-    // for this PID are in a cpuset.  If not already in cpuset, put them in the
-    // main cpuset.  Start by getting the name list of all tasks for this PID.
+    str_from_id_list(cpu_list_str, BUF_SIZE, cpu_bind_list_p);
+    char default_cpuset_name[FNAME_SIZE];
+    snprintf(default_cpuset_name, FNAME_SIZE, "/numad.%d", p->pid);
+    // Look at each task in the process and collect the unique existing cpuset
+    // names.  When any of the cpusets are the default, substitute a numad
+    // generated cpuset for that subtask, and bind that subtask in that cpuset.
+    char fname[FNAME_SIZE];
     struct dirent **namelist;
     snprintf(fname, FNAME_SIZE, "/proc/%d/task", p->pid);
     int num_tasks = scandir(fname, &namelist, name_starts_with_digit, NULL);
     if (num_tasks <= 0) {
         numad_log(LOG_WARNING, "Could not scandir task list for PID: %d\n", p->pid);
-        close(fd);
         return 0;  // Assume the process terminated
     }
-    if (num_tasks == 1) {
-        // This is the normal nonthreaded case.  No sub tasks -- only the
-        // single main PID task, which is already bound above...
-        free(namelist[0]);
-    } else {
-        // Multithreaded so check all of the multiple subtasks. Avoid redundant
-        // subtask cpuset configuration by keeping a list of unique cpusets as
-        // we check each subtask.  If the subtasks have only default cpuset
-        // names, bind those subtasks into the main cpuset with the main PID
-        // instead of adding them to the list.  (cpuset_list is static so we
-        // can reuse the allocated array of pointers.)
-        int num_names = 0;
-        static char **cpuset_list; 
-        static int cpuset_list_size;
-        for (int ix = 0;  (ix < num_tasks);  ix++) {
-            // Check the cpuset name for each task
-            if (!strcmp(namelist[ix]->d_name, pid_str)) {
-                // This is the main PID task, which is already bound above. Skip it here.
-                free(namelist[ix]);
-                continue;
-            }
-            snprintf(fname, FNAME_SIZE, "/proc/%d/task/%s/cpuset", p->pid, namelist[ix]->d_name);
-            if (read_one_line(buf, BUF_SIZE, fname) <= 0) {
-                numad_log(LOG_WARNING, "Could not open %s. Assuming thread completed.\n", fname);
-                free(namelist[ix]);
-                continue;
-            }
-            if (strcmp(buf, "/")) {
-                // Subtask already has a nondefault cpuset name.  Add this
-                // subtask cpuset name to the list of unique cpuset names.  Do
-                // sequential search comparisons first to verify uniqueness.
-                snprintf(fname, FNAME_SIZE, "%s%s", cpuset_dir, buf);
-                int iy = 0;
-                while (iy < num_names) {
-                    if (!strcmp(fname, cpuset_list[iy])) {
-                        break;  // because we already have this cpuset name in the list
-                    }
-                    iy += 1;
-                }
-                if (iy == num_names) {
-                    // We got to the end of the cpulist, so this is a new cpuset name not yet in the list
-                    if (num_names == cpuset_list_size) {
-                        if (cpuset_list_size == 0) {
-                            cpuset_list_size = 10;
-                        } else {
-                            cpuset_list_size *= 2;
-                        }
-                        cpuset_list = realloc(cpuset_list, (cpuset_list_size * sizeof(char *)));
-                        if (cpuset_list == NULL) {
-                            numad_log(LOG_CRIT, "realloc failed\n");
-                            exit(EXIT_FAILURE);
-                        }
-                    }
-                    // Configure this subtask cpuset and, if successful, save a
-                    // copy of the name in the unique cpuset list.
-                    if (configure_cpuset(fname, node_list_buf, cpu_bind_list_buf) < 0) {
-                        numad_log(LOG_WARNING, "Could not configure cpuset %s. Assuming thread completed.\n", fname);
-                        free(namelist[ix]);
-                        continue;
-                    } else {
-                        cpuset_list[num_names++] = strdup(fname);
-                    }
-                }
-            } else {
-                // This task ID has the default cpuset name.  Just add this task ID to the main PID cpuset.
-                numad_log(LOG_NOTICE, "Including task: %s in cpuset: %s\n", namelist[ix]->d_name, pid_cpuset_name);
-                if (write(fd, namelist[ix]->d_name, strlen(namelist[ix]->d_name)) <= 0) {
-                    numad_log(LOG_WARNING, "Could not write to cpuset: %s -- errno: %d\n", pid_cpuset_name, errno);
-                    free(namelist[ix]);
-                    continue;  // Assuming thread completed.
-                }
-            }
-            free(namelist[ix]);
+    // Collect a list of unique cpuset names as we check each task...
+    char buf[BUF_SIZE];
+    int num_cpusets = 0;
+    static char **cpuset_list; 
+    static int cpuset_list_size;
+    int default_cpuset_already_existed = 1;
+    for (int namelist_ix = 0;  (namelist_ix < num_tasks);  namelist_ix++) {
+        // Get the cpuset name for each task
+        snprintf(fname, FNAME_SIZE, "/proc/%d/task/%s/cpuset", p->pid, namelist[namelist_ix]->d_name);
+        if (read_one_line(buf, BUF_SIZE, fname) <= 0) {
+            numad_log(LOG_WARNING, "Could not open %s. Assuming thread completed.\n", fname);
+            free(namelist[namelist_ix]);
+            continue;
         }
-        // Done with subtask unique cpuset names for this PID.  Free them.
-        for (int ix = 0;  (ix < num_names);  ix++) {
-            free(cpuset_list[ix]);
+        if (!strcmp(buf, "/")) {
+            // Substitute default cpuset name if necessary
+            strcpy(buf, default_cpuset_name);
         }
+        // See if we already know about this cpuset. Just do a sequential
+        // search through the already collected cpuset names.
+        int ix = 0;
+        while (ix < num_cpusets) {
+            if (!strcmp(buf, cpuset_list[ix])) {
+                break;  // because we already have this cpuset name in the list
+            }
+            ix += 1;
+        }
+        if (ix == num_cpusets) {
+            // We got to the current end of the cpulist, so this must be a new
+            // cpuset name not yet in the list.  Add it, but first see if we
+            // need to grow the cpuset_list_size...
+            if (num_cpusets == cpuset_list_size) {
+                if (cpuset_list_size == 0) {
+                    cpuset_list_size = 16;
+                } else {
+                    cpuset_list_size *= 2;
+                }
+                cpuset_list = realloc(cpuset_list, (cpuset_list_size * sizeof(char *)));
+                if (cpuset_list == NULL) {
+                    numad_log(LOG_CRIT, "realloc failed\n");
+                    exit(EXIT_FAILURE);
+                }
+            }
+            cpuset_list[num_cpusets++] = mystrdup(buf);
+        }
+        if (!strcmp(buf, default_cpuset_name)) {
+            // If this subtask has the default cpuset name, bind this task into
+            // the default cpuset.  If necessary, create the default numad
+            // generated cpuset first.
+            snprintf(fname, FNAME_SIZE, "%s%s", cpuset_dir, default_cpuset_name);
+            if (access(fname, F_OK) < 0) {
+                default_cpuset_already_existed = 0;
+                numad_log(LOG_NOTICE, "Making new cpuset: %s\n", fname);
+                if (mkdir(fname, S_IRWXU | S_IRWXG | S_IROTH | S_IXOTH) < 0) {
+                    numad_log(LOG_CRIT, "Bad cpuset mkdir -- errno: %d\n", errno);
+                    free(namelist[namelist_ix]);
+                    continue;
+                }
+		// Make default cpuset have constrained CPUs, but all memory NODEs
+		snprintf(fname, FNAME_SIZE, "%s%s/cpuset.cpus", cpuset_dir, default_cpuset_name);
+		write_to_cpuset_file(fname, cpu_list_str);
+		snprintf(fname, FNAME_SIZE, "%s%s/cpuset.mems", cpuset_dir, default_cpuset_name);
+		str_from_id_list(buf, BUF_SIZE, all_nodes_list_p);
+		write_to_cpuset_file(fname, buf);
+            }
+            snprintf(fname, FNAME_SIZE, "%s%s/tasks", cpuset_dir, default_cpuset_name);
+            write_to_cpuset_file(fname, namelist[namelist_ix]->d_name);
+        }
+        free(namelist[namelist_ix]);
     }
     free(namelist);
-    close(fd);
+    // Constrain the CPUs in each cpuset for this PID
+    for (int ix = 0;  (ix < num_cpusets);  ix++) {
+        if (default_cpuset_already_existed || strcmp(cpuset_list[ix], default_cpuset_name)) {
+	    snprintf(fname, FNAME_SIZE, "%s%s/cpuset.cpus", cpuset_dir, cpuset_list[ix]);
+	    write_to_cpuset_file(fname, cpu_list_str);
+	}
+    }
+    // Constrain the memory nodes in each cpuset.  First, write "1" out to
+    // cpuset.memory_migrate in each cpuset.
+    for (int ix = 0;  (ix < num_cpusets);  ix++) {
+        snprintf(fname, FNAME_SIZE, "%s%s/cpuset.memory_migrate", cpuset_dir, cpuset_list[ix]);
+        write_to_cpuset_file(fname, "1");
+    }
+    // Generate node list string from target node list, and write it out to the cpuset.mems file
+    char node_list_str[BUF_SIZE];
+    str_from_id_list(node_list_str, BUF_SIZE, p->node_list_p);
+    for (int ix = 0;  (ix < num_cpusets);  ix++) {
+        snprintf(fname, FNAME_SIZE, "%s%s/cpuset.mems", cpuset_dir, cpuset_list[ix]);
+        write_to_cpuset_file(fname, node_list_str);
+    }
+    // Now, unconstrain the memory nodes in each cpuset. This is done in case
+    // there are processes with rapidly expanding memory consumption.  If the
+    // memory contraints stay in effect, paging / swapping will start when the
+    // node runs out of memory.  Unconstraining the memory binding allows
+    // memory allocations to overflow to other nodes.  Since we keep the
+    // execution threads bound, most additional allocations will stay in the
+    // selected subset of nodes anyway.  First, write "0" out to
+    // cpuset.memory_migrate in each cpuset
+    for (int ix = 0;  (ix < num_cpusets);  ix++) {
+        snprintf(fname, FNAME_SIZE, "%s%s/cpuset.memory_migrate", cpuset_dir, cpuset_list[ix]);
+        write_to_cpuset_file(fname, "0");
+    }
+    // Generate node list string from all the nodes, and write it out to the cpuset.mems file
+    str_from_id_list(buf, BUF_SIZE, all_nodes_list_p);
+    for (int ix = 0;  (ix < num_cpusets);  ix++) {
+        snprintf(fname, FNAME_SIZE, "%s%s/cpuset.mems", cpuset_dir, cpuset_list[ix]);
+        write_to_cpuset_file(fname, buf);
+    }
+    // Forget all the saved cpuset names
+    mystrdup(NULL);
     // Check pid still active
     snprintf(fname, FNAME_SIZE, "/proc/%d", p->pid);
     if (access(fname, F_OK) < 0) {
@@ -1294,7 +1275,7 @@ int bind_process_and_migrate_memory(process_data_p p) {
     } else {
         uint64_t t1 = get_time_stamp();
         p->bind_time_stamp = t1;
-        numad_log(LOG_NOTICE, "PID %d moved to node(s) %s in %d.%d seconds\n", p->pid, node_list_buf, (t1-t0)/100, (t1-t0)%100);
+        numad_log(LOG_NOTICE, "PID %d moved to node(s) %s in %d.%d seconds\n", p->pid, node_list_str, (t1-t0)/100, (t1-t0)%100);
         return 1;
     }
 }
@@ -1537,6 +1518,10 @@ int update_nodes() {
             while (!isdigit(*p)) { p++; }
             CONVERT_DIGITS_TO_NUM(p, KB);
             node[node_ix].MBs_total = (KB / KILOBYTE);
+            if (node[node_ix].MBs_total < 1) {
+                // If a node has zero memory, remove it from the all_nodes_list...
+                CLR_ID_IN_LIST(node_id, all_nodes_list_p);
+            }
             p = strstr(p, "MemFree:");
             if (p != NULL) {
                 p += 8;
@@ -1895,6 +1880,7 @@ id_list_p pick_numa_nodes(int pid, int cpus, int mbs, int assume_enough_cpus) {
     }
     char buf[BUF_SIZE];
     uint64_t process_CPUs = 0;
+    uint64_t nonlocal_memory = 0;
     static node_data_p tmp_node;
     static uint64_t *process_MBs;
     static int process_MBs_num_nodes;
@@ -1909,17 +1895,19 @@ id_list_p pick_numa_nodes(int pid, int cpus, int mbs, int assume_enough_cpus) {
             exit(EXIT_FAILURE);
         }
     }
-
+    // zero per node memory used by this process accounting
+    memset(process_MBs, 0, process_MBs_num_nodes * sizeof(uint64_t));
     // For existing processes, get miscellaneous process specific details
     int pid_ix;
     process_data_p p = NULL;
     if ((pid > 0) && ((pid_ix = process_hash_lookup(pid)) >= 0)) {
         p = &process_hash_table[pid_ix];
-        // Correct current CPUs amount for utilization factor inflation
-        process_CPUs = (cpus * target_utilization) / 100;
+	// The cpus amount requested might be modified by utilization target
+	// and capped by number of threads, so go back to empirical amount of
+	// CPUs actually used to add back into resource assessment (below).
+        process_CPUs = p->CPUs_used;
         // Add up per-node memory in use by this process.
         // This scanning is expensive and should be minimized.
-        memset(process_MBs, 0, process_MBs_num_nodes * sizeof(uint64_t));
         char fname[FNAME_SIZE];
         snprintf(fname, FNAME_SIZE, "/proc/%d/numa_maps", pid);
         FILE *fs = fopen(fname, "r");
@@ -1963,13 +1951,12 @@ id_list_p pick_numa_nodes(int pid, int cpus, int mbs, int assume_enough_cpus) {
             process_MBs[ix] /= MEGABYTE;
             if (p->bind_time_stamp) {
                 if ((process_MBs[ix]) && (!ID_IS_IN_LIST(ix, p->node_list_p))) {
-                    // FIXME: If process previously bound, but memory appears
-                    // to exist where it should not, this might identify
-                    // processes for which the kernel does not move all the
-                    // memory for whatever reason....  Must check for
-                    // significant amount before doing anything about it,
-                    // however, since memory for libraries, etc, can get moved
-                    // around.
+                    // If process previously bound, but memory appears to exist
+                    // where it should not, new nonlocal memory might have been
+                    // allocated, or this might identify processes for which
+                    // the kernel does not move all the memory for whatever
+                    // reason....  Add it up for later threshold test.
+                    nonlocal_memory += process_MBs[ix];
                 }
             } else {
                 // If process has not yet been bound, set node list to existing nodes with memory
@@ -1998,7 +1985,6 @@ id_list_p pick_numa_nodes(int pid, int cpus, int mbs, int assume_enough_cpus) {
             return NULL;
         }
     }  // end of existing PID conditional
-
     // Make a copy of node available resources array.  Add in info specific to
     // this process to equalize available resource quantities wrt locations of
     // resources already in use by this process.  After calculating weighted
@@ -2006,36 +1992,37 @@ id_list_p pick_numa_nodes(int pid, int cpus, int mbs, int assume_enough_cpus) {
     // locations for this process.
     memcpy(tmp_node, node, num_nodes * sizeof(node_data_t) );
     for (int ix = 0;  (ix < num_nodes);  ix++) {
-        // Add back (biased) memory already used by this process on this node
-        tmp_node[ix].MBs_free  += ((process_MBs[ix] * 8) / 8);    // FIXME: apply bias here?
-        if (tmp_node[ix].MBs_free > tmp_node[ix].MBs_total) {
-            tmp_node[ix].MBs_free = tmp_node[ix].MBs_total;
+        if (pid > 0) {
+            // Add back (biased) memory already used by this process on this node
+            tmp_node[ix].MBs_free  += ((process_MBs[ix] * 33) / 32);  // Apply existing mem bias
+            if (tmp_node[ix].MBs_free > tmp_node[ix].MBs_total) {
+                tmp_node[ix].MBs_free = tmp_node[ix].MBs_total;
+            }
+            // Add back CPU in proportion to amount of memory already used on this
+            // node Making assumption here that CPU execution threads are actually
+            // running on the same nodes where memory is assigned...  FIXME: should
+            // we perhaps do this only if process already explicitly bound?
+            uint64_t prorated_CPU = (process_CPUs * process_MBs[ix]) / p->MBs_used;
+            if ((log_level >= LOG_DEBUG) && (prorated_CPU > 0)) {
+                numad_log(LOG_DEBUG, "PROCESS_CPUs[%d]: %ld\n", ix, prorated_CPU);
+            }
+            tmp_node[ix].CPUs_free += prorated_CPU;
+            if (tmp_node[ix].CPUs_free > tmp_node[ix].CPUs_total) {
+                tmp_node[ix].CPUs_free = tmp_node[ix].CPUs_total;
+            }
         }
-        // Add back CPU in proportion to amount of memory already used on this
-        // node Making assumption here that CPU execution threads are actually
-        // running on the same nodes where memory is assigned...  FIXME: should
-        // we perhaps do this only if process already explicitly bound?
-        uint64_t prorated_CPU = (process_CPUs * process_MBs[ix]) / mbs;
-        if ((log_level >= LOG_DEBUG) && (prorated_CPU > 0)) {
-            numad_log(LOG_DEBUG, "PROCESS_CPUs[%d]: %ld\n", ix, prorated_CPU);
-        }
-        tmp_node[ix].CPUs_free += prorated_CPU;
-        if (tmp_node[ix].CPUs_free > tmp_node[ix].CPUs_total) {
-            tmp_node[ix].CPUs_free = tmp_node[ix].CPUs_total;
-        }
+        // Enforce 1/100th CPU minimum
         if (tmp_node[ix].CPUs_free < 1) {
-            // enforce 1/100th CPU minimum
             tmp_node[ix].CPUs_free = 1;
         }
         // numad_log(LOG_DEBUG, "Raw Node[%d]: mem: %ld  cpu: %ld\n", ix, tmp_node[ix].MBs_free, tmp_node[ix].CPUs_free);
         tmp_node[ix].magnitude = combined_value_of_weighted_resources(ix, mbs, cpus, tmp_node[ix].MBs_free, tmp_node[ix].CPUs_free);
         // Bias combined magnitude towards already assigned nodes
         if ((pid > 0) && (ID_IS_IN_LIST(ix, p->node_list_p))) {
-            tmp_node[ix].magnitude *= 17;
-            tmp_node[ix].magnitude /= 16;
+            tmp_node[ix].magnitude *= 33;
+            tmp_node[ix].magnitude /= 32;
         }
     }
-
     // Figure out where to get resources for this request.
     int prev_node_used = -1;
     static id_list_p target_node_list_p;
@@ -2123,15 +2110,23 @@ id_list_p pick_numa_nodes(int pid, int cpus, int mbs, int assume_enough_cpus) {
         }
         tmp_node[0].magnitude = combined_value_of_weighted_resources(0, mbs, cpus, tmp_node[0].MBs_free, tmp_node[0].CPUs_free);
     }
-
     // If this existing process is already located where we want it, then just
-    // return NULL indicating no need to change binding this time.
+    // return NULL indicating no need to change binding this time.  Check the
+    // ammount of nonlocal memory against the target_memlocality_perecent.
     if ((pid > 0) && (p->bind_time_stamp) && (EQUAL_LISTS(target_node_list_p, p->node_list_p))) {
         if (log_level >= LOG_DEBUG) {
             numad_log(LOG_DEBUG, "Process %d already bound to target nodes.\n", p->pid);
         }
-        p->bind_time_stamp = get_time_stamp();
-        return NULL;
+        int non_local_percent = (100 * nonlocal_memory) / p->MBs_used;
+        if (non_local_percent > (100 - target_memlocality)) {
+            if (log_level >= LOG_DEBUG) {
+                numad_log(LOG_DEBUG, "But %d percent of process memory is non-local -- so rebinding.\n", non_local_percent);
+            }
+        } else {
+            // Enough of the memory is located where we want it, so no current need to rebind
+            p->bind_time_stamp = get_time_stamp();
+            return NULL;
+        }
     }
     // Must always provide at least one node for pre-placement advice
     // FIXME: verify this can happen only if no resources requested...
@@ -2151,7 +2146,6 @@ id_list_p pick_numa_nodes(int pid, int cpus, int mbs, int assume_enough_cpus) {
         cmd_name = p->comm;
     }
     numad_log(LOG_NOTICE, "Advising pid %d %s move from nodes (%s) to nodes (%s)\n", pid, cmd_name, buf, buf2);
-
     if (pid > 0) {
         // FIXME: Consider moving this out to caller??
         COPY_LIST(target_node_list_p, p->node_list_p);
@@ -2213,8 +2207,8 @@ int manage_loads() {
     for (int ij = 0;  (ij < num_unbound);  ij++) {
         int best = ij;
         for (int ik = ij + 1;  (ik < num_unbound);  ik++) {
-            uint64_t   ik_mag = (pindex[  ik]->CPUs_used * pindex[  ik]->MBs_size);
-            uint64_t best_mag = (pindex[best]->CPUs_used * pindex[best]->MBs_size);
+            uint64_t   ik_mag = (pindex[  ik]->CPUs_used * pindex[  ik]->MBs_used);
+            uint64_t best_mag = (pindex[best]->CPUs_used * pindex[best]->MBs_used);
             if (ik_mag <= best_mag) continue;
             best = ik;
         }
@@ -2229,8 +2223,8 @@ int manage_loads() {
     for (int ij = num_unbound;  (ij < nprocs);  ij++) {
         int best = ij;
         for (int ik = ij + 1;  (ik < nprocs);  ik++) {
-            uint64_t   ik_mag = (pindex[  ik]->CPUs_used * pindex[  ik]->MBs_size);
-            uint64_t best_mag = (pindex[best]->CPUs_used * pindex[best]->MBs_size);
+            uint64_t   ik_mag = (pindex[  ik]->CPUs_used * pindex[  ik]->MBs_used);
+            uint64_t best_mag = (pindex[best]->CPUs_used * pindex[best]->MBs_used);
             uint64_t  min_mag = ik_mag;
             uint64_t diff_mag = best_mag - ik_mag;
             if (diff_mag < 0) {
@@ -2293,21 +2287,23 @@ int manage_loads() {
         }
         // Expand resources needed estimate using target_utilization factor.
         // Start with the CPUs actually used (capped by number of threads) for
-        // CPUs required, but use the process virtual memory size for MBs
-        // requirement, (We previously used the RSS for MBs needed, but that
-        // caused problems with processes that had quickly expanding memory
-        // usage which also needed to cross NUMA boundaries.  The downside of
-        // this choice is we might not pack processes as tightly as possible
-        // anymore.  Hopefully this will be a relatively rare occurence in
-        // practice.  KVM guests should not be significantly over-provisioned
-        // with memory they will never use!)
+        // CPUs required, and the RSS MBs actually used for the MBs
+        // requirement,
         int mem_target_utilization = target_utilization;
         int cpu_target_utilization = target_utilization;
         // Cap memory utilization at 100 percent (but allow CPUs to oversubscribe)
         if (mem_target_utilization > 100) {
             mem_target_utilization = 100;
         }
-        int mb_request  =  (p->MBs_size * 100) / mem_target_utilization;
+        // If the process virtual memory size is bigger than one node, and it
+        // is already using more than 66 percent of a node, then request MBs
+        // based on the virtual size rather than on the current amount in use.
+        int mb_request;
+        if ((p->MBs_size > node[0].MBs_total) && ((p->MBs_used * 3 / 2) > node[0].MBs_total)) {
+            mb_request = (p->MBs_size * 100) / mem_target_utilization;
+        } else {
+            mb_request = (p->MBs_used * 100) / mem_target_utilization;
+        }
         int cpu_request = (p->CPUs_used * 100) / cpu_target_utilization;
         // But do not give a process more CPUs than it has threads!
         int thread_limit = p->num_threads;
@@ -2381,6 +2377,10 @@ void *set_dynamic_options(void *arg) {
         case 'l':
             numad_log(LOG_NOTICE, "Changing log level to %d\n", msg.body.arg1);
             log_level = msg.body.arg1;
+            break;
+        case 'm':
+            numad_log(LOG_NOTICE, "Changing target memory locality to %d\n", msg.body.arg1);
+            target_memlocality = msg.body.arg1;
             break;
         case 'p':
             numad_log(LOG_NOTICE, "Adding PID %d to inclusion PID list\n", msg.body.arg1);
@@ -2494,6 +2494,7 @@ int main(int argc, char *argv[]) {
     int i_flag = 0;
     int K_flag = 0;
     int l_flag = 0;
+    int m_flag = 0;
     int p_flag = 0;
     int r_flag = 0;
     int S_flag = 0;
@@ -2542,6 +2543,13 @@ int main(int argc, char *argv[]) {
         case 'l':
             l_flag = 1;
             log_level = atoi(optarg);
+            break;
+        case 'm':
+            tmp_int = atoi(optarg);
+            if ((tmp_int >= 50) && (tmp_int <= 100)) {
+                m_flag = 1;
+                target_memlocality = tmp_int;
+            }
             break;
         case 'p':
             p_flag = 1;
@@ -2634,6 +2642,9 @@ int main(int argc, char *argv[]) {
         }
         if (d_flag || l_flag || v_flag) {
             send_msg(daemon_pid, 'l', log_level, 0, "");
+        }
+        if (m_flag) {
+            send_msg(daemon_pid, 'm', target_memlocality, 0, "");
         }
         if (p_flag) {
             send_msg(daemon_pid, 'p', list_pid, 0, "");
