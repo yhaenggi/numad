@@ -54,7 +54,7 @@ Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
 #include <values.h>
 
 
-#define VERSION_STRING "20140620"
+#define VERSION_STRING "20150423"
 
 
 #define VAR_RUN_FILE "/var/run/numad.pid"
