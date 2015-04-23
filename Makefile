@@ -31,6 +31,9 @@ docdir := ${prefix}/share/doc
 
 all: numad
 
+cgroups:
+	apt-get install cgroup-lite
+
 LDLIBS := -lpthread -lrt -lm
 numad: numad.o
 
