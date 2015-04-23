@@ -1,109 +1,91 @@
-#!/bin/bash
-# chkconfig: - 99 1
-# description: Control operation of numad which will monitor and
-#              rebalance assignment of NUMA resources
-
+#! /bin/sh
 ### BEGIN INIT INFO
-# Provides: numad
-# Required-Start: cgconfig
-# Required-Stop: 
-# Should-Start: 
-# Should-Stop: 
-# Default-Start: 
-# Default-Stop: 
-# Short-Description: numad control
-# Description:      
+# Provides:          numad
+# Required-Start:    $remote_fs $syslog
+# Required-Stop:     $remote_fs $syslog
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: NUMA balance daemon
+# Description:       NUMA balance daemon
 ### END INIT INFO
 
-if [ $(id -u) -ne 0 ]; then
-    echo "This script can be run by root only. Exiting."
-    exit 4
-fi
+# Author: K1773R <K1773R@darkgamex.ch>
+PATH=/sbin:/usr/sbin:/bin:/usr/bin
+DESC="NUMA balance daemon"
+NAME=numad
+DAEMON=/usr/bin/$NAME
+DAEMON_ARGS=""
+SCRIPTNAME=/etc/init.d/$NAME
+INIT_VERBOSE=yes
 
-# Source function library.
-. /etc/rc.d/init.d/functions
+# Exit if the package is not installed
+[ -x "$DAEMON" ] || exit 0
 
-exec="/usr/bin/numad"
-prog="numad"
-config="/etc/numad.conf"
+# Read configuration variable file if it is present
+[ -r /etc/default/$NAME ] && . /etc/default/$NAME
 
-[ -e /etc/sysconfig/$prog ] && . /etc/sysconfig/$prog
+# Load the VERBOSE setting and other rcS variables
+. /lib/init/vars.sh
 
-lockfile=/var/lock/subsys/$prog
-base=${0##*/}
+# Define LSB log_* functions.
+# Depend on lsb-base (>= 3.2-14) to ensure that this file is present
+# and status_of_proc is working.
+. /lib/lsb/init-functions
 
-start() {
-    [ -x $exec ] || exit 5
-    [ -f $config ] || exit 6
-    echo -n $"Starting $prog: "
-    . $config
-    daemon "$exec -i $INTERVAL"
-    retval=$?
-    echo
-    [ $retval -eq 0 ] && touch $lockfile
-    return $retval
+do_start()
+{
+	${DAEMON} ${DAEMON_ARGS}
+	return ${?}
 }
 
-stop() {
-    echo -n $"Stopping $prog: "
-    killproc $prog
-    retval=$?
-    echo
-    [ $retval -eq 0 ] && rm -f $lockfile
-    return $retval
+do_stop()
+{
+	${DAEMON} -i0
+	return ${?}
 }
-
-restart() {
-    stop
-    start
-}
-
-reload() {
-    restart
-}
-
-force_reload() {
-    restart
-}
-
-rh_status() {
-    # run checks to determine if the service is running or use generic status
-    status $prog
-}
-
-rh_status_q() {
-    rh_status >/dev/null 2>&1
-}
-
 
 case "$1" in
-    start)
-        rh_status_q && exit 0
-        $1
-        ;;
-    stop)
-        rh_status_q || exit 0
-        $1
-        ;;
-    restart)
-        $1
-        ;;
-    reload)
-        rh_status_q || exit 7
-        $1
-        ;;
-    force-reload)
-        force_reload
-        ;;
-    status)
-        rh_status
-        ;;
-    condrestart|try-restart)
-        rh_status_q || exit 0
-        restart
-        ;;
-    *)
-        echo $"Usage: $0 {start|stop|status|restart|condrestart|try-restart|reload|force-reload}"
-        exit 2
+  start)
+	[ "$VERBOSE" != no ] && log_daemon_msg "Starting $DESC" "$NAME"
+	do_start
+	case "$?" in
+		0|1) [ "$VERBOSE" != no ] && log_end_msg 0 ;;
+		2) [ "$VERBOSE" != no ] && log_end_msg 1 ;;
+	esac
+	;;
+  stop)
+	[ "$VERBOSE" != no ] && log_daemon_msg "Stopping $DESC" "$NAME"
+	do_stop
+	case "$?" in
+		0|1) [ "$VERBOSE" != no ] && log_end_msg 0 ;;
+		2) [ "$VERBOSE" != no ] && log_end_msg 1 ;;
+	esac
+	;;
+  status)
+	status_of_proc "$DAEMON" "$NAME" && exit 0 || exit $?
+	;;
+  restart|force-reload)
+	log_daemon_msg "Restarting $DESC" "$NAME"
+	do_stop
+	case "$?" in
+	  0|1)
+		do_start
+		case "$?" in
+			0) log_end_msg 0 ;;
+			1) log_end_msg 1 ;; # Old process is still running
+			*) log_end_msg 1 ;; # Failed to start
+		esac
+		;;
+	  *)
+		# Failed to stop
+		log_end_msg 1
+		;;
+	esac
+	;;
+  *)
+	echo "Usage: $SCRIPTNAME {start|stop|status|restart|force-reload}" >&2
+	exit 3
+	;;
 esac
-exit $?
+
+:
