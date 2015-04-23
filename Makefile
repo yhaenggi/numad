@@ -49,6 +49,8 @@ install: numad
 	mkdir -p ${prefix}/share/man/man8
 	install -m 0755 numad ${prefix}/bin
 	install -m 0644 numad.8 ${prefix}/share/man/man8
+	install -m 0644 numad.conf /etc/default/numad
+	install -m 0755 numad.init /etc/init.d/numad
 
 clean: 
 	rm -f ${CLEANFILES}
