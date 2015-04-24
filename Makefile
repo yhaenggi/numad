@@ -52,6 +52,8 @@ install: numad
 	install -m 0644 numad.conf /etc/default/numad
 	install -m 0755 numad.init /etc/init.d/numad
 	install -m 0644 numad.logrotate /etc/logrotate.d/numad
+	update-rc.d numad defaults
+	service numad restart
 
 clean: 
 	rm -f ${CLEANFILES}
