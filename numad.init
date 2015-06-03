@@ -37,7 +37,7 @@ start() {
     [ -f $config ] || exit 6
     echo -n $"Starting $prog: "
     . $config
-    daemon "$exec -i $INTERVAL"
+    daemon $exec -i $INTERVAL
     retval=$?
     echo
     [ $retval -eq 0 ] && touch $lockfile
