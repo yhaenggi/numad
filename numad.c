@@ -2505,7 +2505,7 @@ int main(int argc, char *argv[]) {
     int x_flag = 0;
     int tmp_int = 0;
     long list_pid = 0;
-    while ((opt = getopt(argc, argv, "C:dD:hH:i:K:l:p:r:R:S:t:u:vVw:x:")) != -1) {
+    while ((opt = getopt(argc, argv, "C:dD:hH:i:K:l:p:r:R:S:t:u:vVw:x:m:")) != -1) {
         switch (opt) {
         case 'C':
             C_flag = 1;
