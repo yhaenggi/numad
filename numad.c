@@ -40,6 +40,10 @@ Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
+#include <unistd.h>
+#include <values.h>
+
 #include <sys/ipc.h>
 #include <sys/mman.h>
 #include <sys/msg.h>
@@ -49,25 +53,15 @@ Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
 #include <sys/syslog.h>
 #include <sys/time.h>
 #include <sys/types.h>
-#include <time.h>
-#include <unistd.h>
-#include <values.h>
+
+#include <asm/unistd.h>
 
 
-#define VERSION_STRING "20150423"
+#define VERSION_STRING "20150602"
 
 
 #define VAR_RUN_FILE "/var/run/numad.pid"
 #define VAR_LOG_FILE "/var/log/numad.log"
-
-char *cpuset_dir = NULL;
-char *cpuset_dir_list[] =  {
-    NULL,
-    "/sys/fs/cgroup/cpuset",
-    "/cgroup/cpuset",
-    NULL
-};
-
 
 #define KILOBYTE (1024)
 #define MEGABYTE (1024 * 1024)
@@ -103,8 +97,8 @@ char *cpuset_dir_list[] =  {
 int num_cpus = 0;
 int num_nodes = 0;
 int threads_per_core = 0;
-int page_size_in_bytes = 0;
-int huge_page_size_in_bytes = 0;
+uint64_t page_size_in_bytes = 0;
+uint64_t huge_page_size_in_bytes = 0;
 
 int min_interval = MIN_INTERVAL;
 int max_interval = MAX_INTERVAL;
@@ -124,7 +118,6 @@ int requested_cpus = 0;
 int got_sighup = 0;
 int got_sigterm = 0;
 int got_sigquit = 0;
-
 
 void sig_handler(int signum) { 
     switch (signum) {
@@ -154,7 +147,7 @@ void numad_log(int level, const char *fmt, ...) {
     }
     char buf[BUF_SIZE];
     time_t ts = time(NULL);
-    sprintf(buf, ctime(&ts));
+    strncpy(buf, ctime(&ts), sizeof(buf));
     char *p = &buf[strlen(buf) - 1];
     *p++ = ':';
     *p++ = ' ';
@@ -170,9 +163,10 @@ void open_log_file() {
     log_fs = fopen(VAR_LOG_FILE, "a");
     if (log_fs == NULL) {
         log_fs = stderr;
-        numad_log(LOG_ERR, "Cannot open numad log file -- using stderr\n");
+        numad_log(LOG_ERR, "Cannot open numad log file (errno: %d) -- using stderr\n", errno);
     }
 }
+
 
 void close_log_file() {
     if (log_fs != NULL) {
@@ -250,13 +244,17 @@ void send_msg(long dst_pid, long cmd, long arg1, long arg2, char *s) {
 }
 
 
+
 typedef struct id_list {
-    // Use CPU_SET(3) <sched.h> cpuset bitmasks,
+    // Use CPU_SET(3) <sched.h> bitmasks,
     // but bundle size and pointer together
     // and genericize for both CPU and Node IDs
     cpu_set_t *set_p; 
     size_t bytes;
 } id_list_t, *id_list_p;
+
+#define ID_LIST_SET_P(list_p) (list_p->set_p)
+#define ID_LIST_BYTES(list_p) (list_p->bytes)
 
 #define INIT_ID_LIST(list_p, num_elements) \
     list_p = malloc(sizeof(id_list_t)); \
@@ -297,7 +295,7 @@ typedef struct id_list {
 #define  OR_LISTS( or_list_p, list_1_p, list_2_p)  CPU_OR_S( or_list_p->bytes,  or_list_p->set_p, list_1_p->set_p, list_2_p->set_p)
 #define XOR_LISTS(xor_list_p, list_1_p, list_2_p) CPU_XOR_S(xor_list_p->bytes, xor_list_p->set_p, list_1_p->set_p, list_2_p->set_p)
 
-int negate_list(id_list_p list_p) {
+int negate_cpu_list(id_list_p list_p) {
     if (list_p == NULL) {
         numad_log(LOG_CRIT, "Cannot negate a NULL list\n");
         exit(EXIT_FAILURE);
@@ -384,25 +382,6 @@ terminate_string:
     return (p - str_p);
 }
 
-id_list_p all_cpus_list_p = NULL;
-id_list_p all_nodes_list_p = NULL;
-char *reserved_cpu_str = NULL;
-id_list_p reserved_cpu_mask_list_p = NULL;
-uint64_t node_info_time_stamp = 0;
-
-
-int read_one_line(char *buf, int buf_size, char *fname) {
-    int fd = open(fname, O_RDONLY, 0);
-    if (fd < 0) {
-        return fd;
-    }
-    int bytes = read(fd, buf, buf_size);
-    if (buf[bytes - 1] == '\n') {
-        buf[bytes - 1] = '\0';
-    }
-    close(fd);
-    return bytes;
-}
 
 
 typedef struct node_data {
@@ -415,17 +394,19 @@ typedef struct node_data {
     uint8_t *distance;
     id_list_p cpu_list_p; 
 } node_data_t, *node_data_p;
-
 node_data_p node = NULL;
 
-uint64_t min_node_CPUs_free = MAXINT;
-uint64_t min_node_MBs_free = MAXINT;
-uint64_t max_node_CPUs_free = 0;
-uint64_t max_node_MBs_free = 0;
-uint64_t avg_node_CPUs_free = 0;
-uint64_t avg_node_MBs_free = 0;
+int min_node_CPUs_free_ix = -1;
+int min_node_MBs_free_ix = -1;
+long min_node_CPUs_free = MAXINT;
+long min_node_MBs_free = MAXINT;
+long max_node_CPUs_free = 0;
+long max_node_MBs_free = 0;
+long avg_node_CPUs_free = 0;
+long avg_node_MBs_free = 0;
 double stddev_node_CPUs_free = 0.0;
 double stddev_node_MBs_free = 0.0;
+
 
 
 // RING_BUF_SIZE must be a power of two
@@ -447,6 +428,7 @@ typedef struct process_data {
     int ring_buf_ix;
     char *comm;
     id_list_p node_list_p;
+    uint64_t *process_MBs;
 } process_data_t, *process_data_p;
 
 
@@ -506,7 +488,8 @@ int process_hash_insert(int pid) {
 }
 
 int process_hash_update(process_data_p newp) {
-    // This updates hash table stats for processes we are monitoring
+    // This updates hash table stats for processes we are monitoring. Only the
+    // scalar resource consumption stats need to be updated here.
     int new_hash_table_entry = 1;
     int ix = process_hash_insert(newp->pid);
     if (ix >= 0) {
@@ -527,8 +510,6 @@ int process_hash_update(process_data_p newp) {
             }
             p->CPUs_used = max_CPUs_used;
         }
-// FIXME: seems like this comm check should not be necessary every update
-// But it does happen only for candidates that cross the memory threshold...
         if ((!p->comm) || (strcmp(p->comm, newp->comm))) {
             if (p->comm) {
                 free(p->comm);
@@ -570,6 +551,7 @@ int process_hash_remove(int pid) {
         // remove the target
         process_data_p dp = &process_hash_table[ix];
         if (dp->comm) { free(dp->comm); }
+        if (dp->process_MBs) { free(dp->process_MBs); }
         FREE_LIST(dp->node_list_p);
         memset(dp, 0, sizeof(process_data_t));
         // bubble up the collision chain and rehash if neeeded
@@ -627,21 +609,7 @@ void process_hash_table_dump() {
                 "ix: %d  PID: %d %s  Thds: %d  CPU %ld  MBs: %ld/%ld Data TS: %ld  Bind TS: %ld\n",
                 ix, p->pid, ((p->comm != NULL) ? p->comm : "(Null)"), p->num_threads,
                 p->CPUs_used, p->MBs_used, p->MBs_size, p->data_time_stamp, p->bind_time_stamp);
-            // FIXME: make this dump every field
-        }
-    }
-}
-
-void remove_obsolete_cpuset_if_no_tasks(int pid) {
-    // PID parameter has already been checked via kill(0) and seems dead
-    char buf[BUF_SIZE];
-    char fname[FNAME_SIZE];
-    snprintf(fname, FNAME_SIZE, "%s/numad.%d/tasks", cpuset_dir, pid);
-    if ((access(fname, F_OK) == 0) && (read_one_line(buf, BUF_SIZE, fname) <= 1)) {
-        snprintf(fname, FNAME_SIZE, "%s/numad.%d", cpuset_dir, pid);
-        numad_log(LOG_NOTICE, "Removing obsolete cpuset: %s\n", fname);
-        if (rmdir(fname) < 0) {
-            numad_log(LOG_ERR, "bad cpuset rmdir\n");
+            // FIXME: make this dump every field, but this is not even currently used
         }
     }
 }
@@ -658,9 +626,7 @@ void process_hash_table_cleanup(uint64_t update_time) {
                 p->CPUs_used = 0;
                 // Check for dead pids and remove them...
                 if ((kill(p->pid, 0) == -1) && (errno == ESRCH)) {
-                    // Seems dead.  Forget this pid -- after first checking 
-                    // and removing obsolete numad.PID cpuset directories.  
-                    remove_obsolete_cpuset_if_no_tasks(p->pid);
+                    // Seems dead.  Forget this pid
                     process_hash_remove(p->pid);
                     num_hash_entries_used -= 1;
                 }
@@ -673,40 +639,6 @@ void process_hash_table_cleanup(uint64_t update_time) {
     }
 }
 
-static int name_starts_with_numad(const struct dirent *dptr) {
-    return (strncmp(dptr->d_name, "numad.", 6) == 0);
-}
-
-void *clean_obsolete_cpusets(void *arg) {
-    // int arg_value = *(int *)arg;
-    for (;;) {
-        // Loop here forever (slowly) cleaning obsolete cpusets
-        sleep(571);  // Arbitrary number a little less than ten minutes
-        struct dirent **namelist;
-        int files = scandir(cpuset_dir, &namelist, name_starts_with_numad, NULL);
-        if (files < 0) {
-            numad_log(LOG_ERR, "Troubled scanning for obsolete cpusets\n");
-            continue;
-        }
-        for (int ix = 0;  (ix < files);  ix++) {
-            char *p = &(namelist[ix]->d_name[6]);
-            if (isdigit(*p)) {
-                int pid;
-                CONVERT_DIGITS_TO_NUM(p, pid);
-                // If it seems like a valid PID -- that is NOT in the hash
-                // table -- and the process appears to be dead, then try to
-                // delete the cpuset directory.  (Dead PIDs we know about in
-                // the hash table will be cleaned separately.)
-                if ((pid > 10) && (process_hash_lookup(pid) < 0)
-                    && (kill(pid, 0) == -1) && (errno == ESRCH)) {
-                    remove_obsolete_cpuset_if_no_tasks(pid);
-                }
-            }
-            free(namelist[ix]);
-        }
-        free(namelist);
-    }
-}
 
 
 typedef struct pid_list {
@@ -790,7 +722,6 @@ void print_usage_and_exit(char *prog_name) {
     fprintf(stderr, "-C 1  to count inactive file cache as available memory (default 1)\n");
     fprintf(stderr, "-C 0  to count inactive file cache memory as unavailable (default 1)\n");
     fprintf(stderr, "-d for debug logging (same effect as '-l 7')\n");
-    fprintf(stderr, "-D <CGROUP_MOUNT_POINT> to specify cgroup mount point\n");
     fprintf(stderr, "-h to print this usage info\n");
     fprintf(stderr, "-H <N> to set THP scan_sleep_ms (default %d)\n", DEFAULT_THP_SCAN_SLEEP_MS);
     fprintf(stderr, "-i [<MIN>:]<MAX> to specify interval seconds\n");
@@ -824,6 +755,7 @@ void set_thp_scan_sleep_ms(int new_ms) {
         char buf[BUF_SIZE];
         int bytes = read(fd, buf, BUF_SIZE);
         if (bytes > 0) {
+            buf[bytes] = '\0';
             int cur_ms;
             char *p = buf;
             CONVERT_DIGITS_TO_NUM(p, cur_ms);
@@ -838,39 +770,7 @@ void set_thp_scan_sleep_ms(int new_ms) {
     }
 }
 
-
 void check_prereqs(char *prog_name) {
-    // Verify cpusets are available on this system.
-    char **dir = &cpuset_dir_list[0];
-    if (*dir == NULL) { dir++; }
-    while (*dir != NULL) {
-        cpuset_dir = *dir;
-        char fname[FNAME_SIZE];
-        snprintf(fname, FNAME_SIZE, "%s/cpuset.cpus", cpuset_dir);
-        if (access(fname, F_OK) == 0) {
-            break;
-        }
-        dir++;
-    }
-    if (*dir == NULL) {
-        fprintf(stderr, "\n");
-        fprintf(stderr, "Are CPUSETs enabled on this system?\n");
-        fprintf(stderr, "They are required for %s to function.\n\n", prog_name);
-        fprintf(stderr, "Check manpage CPUSET(7). You might need to do something like:\n");
-        fprintf(stderr, "    # mkdir <DIRECTORY_MOUNT_POINT>\n");
-        fprintf(stderr, "    # mount cgroup -t cgroup -o cpuset <DIRECTORY_MOUNT_POINT>\n");
-        fprintf(stderr, "    where <DIRECTORY_MOUNT_POINT> is something like:\n");
-        dir = &cpuset_dir_list[0];
-        if (*dir == NULL) { dir++; }
-        while (*dir != NULL) {
-            fprintf(stderr, "      - %s\n", *dir);
-            dir++;
-        }
-        fprintf(stderr, "and then try again...\n");
-        fprintf(stderr, "Or, use '-D <DIRECTORY_MOUNT_POINT>' to specify the correct mount point\n");
-        fprintf(stderr, "\n");
-        exit(EXIT_FAILURE);
-    }
     // Adjust kernel tunable to scan for THP more frequently...
     set_thp_scan_sleep_ms(thp_scan_sleep_ms);
 }
@@ -903,7 +803,6 @@ int get_daemon_pid() {
     // Daemon must be running already.
     return pid; 
 }
-
 
 int register_numad_pid() {
     int pid;
@@ -1004,7 +903,7 @@ int get_num_cpus() {
 int get_num_kvm_vcpu_threads(int pid) {
     // Try to return the number of vCPU threads for this VM guest,
     // excluding the IO threads.  All failures return MAXINT.
-    // FIXME: figure out some better way to do this...
+    // FIXME: someday figure out some better way to do this...
     char fname[FNAME_SIZE];
     snprintf(fname, FNAME_SIZE, "/proc/%d/cmdline", pid);
     int fd = open(fname, O_RDONLY, 0);
@@ -1032,8 +931,8 @@ int get_num_kvm_vcpu_threads(int pid) {
 }
 
 
-int get_huge_page_size_in_bytes() {
-    int huge_page_size = 0;;
+uint64_t get_huge_page_size_in_bytes() {
+    uint64_t huge_page_size = 0;;
     FILE *fs = fopen("/proc/meminfo", "r");
     if (!fs) {
         numad_log(LOG_CRIT, "Can't open /proc/meminfo\n");
@@ -1046,7 +945,7 @@ int get_huge_page_size_in_bytes() {
             while ((!isdigit(*p)) && (p < buf + BUF_SIZE)) {
                 p++;
             }
-            huge_page_size = atoi(p);
+            huge_page_size = atol(p);
             break;
         }
     }
@@ -1072,51 +971,11 @@ static int name_starts_with_digit(const struct dirent *dptr) {
 }
 
 
-char *mystrdup(char *s) {
-    static int str_buf_pos = 0;
-    static int str_buf_size = 0;
-    static char *str_buf = NULL;
-    if (s == NULL) {
-        // NULL string means throw away all previously saved strings...
-        str_buf_pos = 0;
-        return NULL;
-    }
-    int s_len = strlen(s);
-    if (str_buf_pos + s_len + 1 >= str_buf_size) {
-        // Need to expand buffer space
-        if (str_buf_size == 0) {
-            str_buf_size = 4096;
-        } else {
-            str_buf_size *= 2;
-        }
-        str_buf = realloc(str_buf, str_buf_size);
-        if (str_buf == NULL) {
-            numad_log(LOG_CRIT, "realloc failed\n");
-            exit(EXIT_FAILURE);
-        }
-    }
-    char *p = &str_buf[str_buf_pos];
-    memcpy(p, s, s_len + 1);
-    str_buf_pos += s_len + 1;
-    return p;
-}
 
-
-int write_to_cpuset_file(char *fname, char *s) {
-    int fd = open(fname, O_WRONLY | O_TRUNC, 0);
-    if (fd == -1) {
-        numad_log(LOG_CRIT, "Could not open %s -- errno: %d\n", fname, errno);
-        return -1;
-    }
-    numad_log(LOG_DEBUG, "Writing %s to: %s\n", s, fname);
-    if (write(fd, s, strlen(s)) <= 0) {
-        numad_log(LOG_CRIT, "Could not write %s to %s -- errno: %d\n", s, fname, errno);
-        return -1;
-    }
-    close(fd);
-    return 0;
-}
-
+#define BITS_IN_LONG (CHAR_BIT * sizeof(unsigned long))
+#define   SET_BIT(i,a)   (a)[(i) / BITS_IN_LONG] |=  (1u << ((i) % BITS_IN_LONG))
+#define  TEST_BIT(i,a) (((a)[(i) / BITS_IN_LONG] &   (1u << ((i) % BITS_IN_LONG))) != 0)
+#define CLEAR_BIT(i,a)   (a)[(i) / BITS_IN_LONG] &= ~(1u << ((i) % BITS_IN_LONG))
 
 int bind_process_and_migrate_memory(process_data_p p) {
     uint64_t t0 = get_time_stamp();
@@ -1129,8 +988,7 @@ int bind_process_and_migrate_memory(process_data_p p) {
         numad_log(LOG_CRIT, "Cannot bind to unspecified node(s)\n");
         exit(EXIT_FAILURE);
     }
-    // Generate cpu list string derived from target node list.
-    char cpu_list_str[BUF_SIZE];
+    // Generate CPU list derived from target node list.
     static id_list_p cpu_bind_list_p;
     CLEAR_CPU_LIST(cpu_bind_list_p);
     int nodes = NUM_IDS_IN_LIST(p->node_list_p);
@@ -1142,12 +1000,6 @@ int bind_process_and_migrate_memory(process_data_p p) {
         }
         node_id += 1;
     }
-    str_from_id_list(cpu_list_str, BUF_SIZE, cpu_bind_list_p);
-    char default_cpuset_name[FNAME_SIZE];
-    snprintf(default_cpuset_name, FNAME_SIZE, "/numad.%d", p->pid);
-    // Look at each task in the process and collect the unique existing cpuset
-    // names.  When any of the cpusets are the default, substitute a numad
-    // generated cpuset for that subtask, and bind that subtask in that cpuset.
     char fname[FNAME_SIZE];
     struct dirent **namelist;
     snprintf(fname, FNAME_SIZE, "/proc/%d/task", p->pid);
@@ -1156,150 +1008,96 @@ int bind_process_and_migrate_memory(process_data_p p) {
         numad_log(LOG_WARNING, "Could not scandir task list for PID: %d\n", p->pid);
         return 0;  // Assume the process terminated
     }
-    // Collect a list of unique cpuset names as we check each task...
-    char buf[BUF_SIZE];
-    int num_cpusets = 0;
-    static char **cpuset_list; 
-    static int cpuset_list_size;
-    int default_cpuset_already_existed = 1;
+    // Set the affinity of each task in the process...
     for (int namelist_ix = 0;  (namelist_ix < num_tasks);  namelist_ix++) {
-        // Get the cpuset name for each task
-        snprintf(fname, FNAME_SIZE, "/proc/%d/task/%s/cpuset", p->pid, namelist[namelist_ix]->d_name);
-        if (read_one_line(buf, BUF_SIZE, fname) <= 0) {
-            numad_log(LOG_WARNING, "Could not open %s. Assuming thread completed.\n", fname);
-            free(namelist[namelist_ix]);
-            continue;
-        }
-        if (!strcmp(buf, "/")) {
-            // Substitute default cpuset name if necessary
-            strcpy(buf, default_cpuset_name);
-        }
-        // See if we already know about this cpuset. Just do a sequential
-        // search through the already collected cpuset names.
-        int ix = 0;
-        while (ix < num_cpusets) {
-            if (!strcmp(buf, cpuset_list[ix])) {
-                break;  // because we already have this cpuset name in the list
+        int tid = atoi(namelist[namelist_ix]->d_name);
+        int rc = sched_setaffinity(tid, ID_LIST_BYTES(cpu_bind_list_p), ID_LIST_SET_P(cpu_bind_list_p));
+        if (rc < 0) {
+            // Check errno
+            if (errno == ESRCH) {
+                numad_log(LOG_WARNING, "Tried to move PID %d, TID %d, but it apparently went away.\n", p->pid, tid);
             }
-            ix += 1;
-        }
-        if (ix == num_cpusets) {
-            // We got to the current end of the cpulist, so this must be a new
-            // cpuset name not yet in the list.  Add it, but first see if we
-            // need to grow the cpuset_list_size...
-            if (num_cpusets == cpuset_list_size) {
-                if (cpuset_list_size == 0) {
-                    cpuset_list_size = 16;
-                } else {
-                    cpuset_list_size *= 2;
-                }
-                cpuset_list = realloc(cpuset_list, (cpuset_list_size * sizeof(char *)));
-                if (cpuset_list == NULL) {
-                    numad_log(LOG_CRIT, "realloc failed\n");
-                    exit(EXIT_FAILURE);
-                }
-            }
-            cpuset_list[num_cpusets++] = mystrdup(buf);
-        }
-        if (!strcmp(buf, default_cpuset_name)) {
-            // If this subtask has the default cpuset name, bind this task into
-            // the default cpuset.  If necessary, create the default numad
-            // generated cpuset first.
-            snprintf(fname, FNAME_SIZE, "%s%s", cpuset_dir, default_cpuset_name);
-            if (access(fname, F_OK) < 0) {
-                default_cpuset_already_existed = 0;
-                numad_log(LOG_NOTICE, "Making new cpuset: %s\n", fname);
-                if (mkdir(fname, S_IRWXU | S_IRWXG | S_IROTH | S_IXOTH) < 0) {
-                    numad_log(LOG_CRIT, "Bad cpuset mkdir -- errno: %d\n", errno);
-                    free(namelist[namelist_ix]);
-                    continue;
-                }
-		// Make default cpuset have constrained CPUs, but all memory NODEs
-		snprintf(fname, FNAME_SIZE, "%s%s/cpuset.cpus", cpuset_dir, default_cpuset_name);
-		write_to_cpuset_file(fname, cpu_list_str);
-		snprintf(fname, FNAME_SIZE, "%s%s/cpuset.mems", cpuset_dir, default_cpuset_name);
-		str_from_id_list(buf, BUF_SIZE, all_nodes_list_p);
-		write_to_cpuset_file(fname, buf);
-            }
-            snprintf(fname, FNAME_SIZE, "%s%s/tasks", cpuset_dir, default_cpuset_name);
-            write_to_cpuset_file(fname, namelist[namelist_ix]->d_name);
+            numad_log(LOG_ERR, "Bad sched_setaffinity() on PID %d, TID %d -- errno: %d\n", p->pid, tid, errno);
         }
         free(namelist[namelist_ix]);
     }
     free(namelist);
-    // Constrain the CPUs in each cpuset for this PID
-    for (int ix = 0;  (ix < num_cpusets);  ix++) {
-        if (default_cpuset_already_existed || strcmp(cpuset_list[ix], default_cpuset_name)) {
-	    snprintf(fname, FNAME_SIZE, "%s%s/cpuset.cpus", cpuset_dir, cpuset_list[ix]);
-	    write_to_cpuset_file(fname, cpu_list_str);
-	}
+    // Now move the memory to the target nodes....
+    static unsigned long *dest_mask;
+    static unsigned long *from_mask;
+    static int allocated_bytes_in_masks;
+    // Lie about num_nodes being one bigger because of kernel bug...
+    int num_bytes_in_masks = (1 + ((num_nodes + 1) / BITS_IN_LONG)) * sizeof(unsigned long);
+    if (allocated_bytes_in_masks < num_bytes_in_masks) {
+        allocated_bytes_in_masks = num_bytes_in_masks;
+        dest_mask = realloc(dest_mask, num_bytes_in_masks);
+        from_mask = realloc(from_mask, num_bytes_in_masks);
+        if ((dest_mask == NULL) || (from_mask == NULL)) {
+            numad_log(LOG_CRIT, "bit mask malloc failed\n");
+            exit(EXIT_FAILURE);
+        }
     }
-    // Constrain the memory nodes in each cpuset.  First, write "1" out to
-    // cpuset.memory_migrate in each cpuset.
-    for (int ix = 0;  (ix < num_cpusets);  ix++) {
-        snprintf(fname, FNAME_SIZE, "%s%s/cpuset.memory_migrate", cpuset_dir, cpuset_list[ix]);
-        write_to_cpuset_file(fname, "1");
+    // In an effort to put semi-balanced memory in each target node, move the
+    // contents from the source node with the max amount of memory to the
+    // destination node with the least amount of memory.  Repeat until done.
+    int prev_from_node_id = -1;
+    for (;;) {
+        int min_dest_node_id = -1;
+        int max_from_node_id = -1;
+        for (int node_ix = 0;  (node_ix < num_nodes);  node_ix++) {
+            node_id = node[node_ix].node_id;
+            if (ID_IS_IN_LIST(node_id, p->node_list_p)) {
+                if ((min_dest_node_id < 0) || (p->process_MBs[min_dest_node_id] >= p->process_MBs[node_id])) {
+                    // The ">=" above is intentional, so we tend to move memory to higher numbered nodes
+                    min_dest_node_id = node_id;
+                }
+            } else {
+                if ((max_from_node_id < 0) || (p->process_MBs[max_from_node_id] < p->process_MBs[node_id])) {
+                    max_from_node_id = node_id;
+                }
+            }
+        }
+        if ((p->process_MBs[max_from_node_id] == 0) || (max_from_node_id == prev_from_node_id)) {
+            break;
+        }
+        memset(dest_mask, 0, num_bytes_in_masks);
+        memset(from_mask, 0, num_bytes_in_masks);
+        SET_BIT(max_from_node_id, from_mask);
+        SET_BIT(min_dest_node_id, dest_mask);
+        numad_log(LOG_DEBUG, "Moving memory from node: %d to node %d\n", max_from_node_id, min_dest_node_id);
+        // Lie about num_nodes being one bigger because of kernel bug...
+        int rc = syscall(__NR_migrate_pages, p->pid, num_nodes + 1, from_mask, dest_mask);
+        if (rc > 2) {
+            // rc == the number of pages that could not be moved.  
+            // A couple pages not moving is probably not a problem, hence ignoring rc == 1 or 2.
+            numad_log(LOG_WARNING, "Tried to move PID %d, but %d pages would not move.\n", p->pid, rc);
+        } else if (rc < 0) {
+            // Check errno
+            if (errno == ESRCH) {
+                numad_log(LOG_WARNING, "Tried to move PID %d, but it apparently went away.\n", p->pid);
+                return 0;  // Assume the process terminated
+            }
+        }
+        // Assume memory did move for current accounting purposes...
+        p->process_MBs[min_dest_node_id] += p->process_MBs[max_from_node_id];
+        p->process_MBs[max_from_node_id] = 0;
+        prev_from_node_id = max_from_node_id;
     }
-    // Generate node list string from target node list, and write it out to the cpuset.mems file
-    char node_list_str[BUF_SIZE];
-    str_from_id_list(node_list_str, BUF_SIZE, p->node_list_p);
-    for (int ix = 0;  (ix < num_cpusets);  ix++) {
-        snprintf(fname, FNAME_SIZE, "%s%s/cpuset.mems", cpuset_dir, cpuset_list[ix]);
-        write_to_cpuset_file(fname, node_list_str);
-    }
-    // Now, unconstrain the memory nodes in each cpuset. This is done in case
-    // there are processes with rapidly expanding memory consumption.  If the
-    // memory contraints stay in effect, paging / swapping will start when the
-    // node runs out of memory.  Unconstraining the memory binding allows
-    // memory allocations to overflow to other nodes.  Since we keep the
-    // execution threads bound, most additional allocations will stay in the
-    // selected subset of nodes anyway.  First, write "0" out to
-    // cpuset.memory_migrate in each cpuset
-    for (int ix = 0;  (ix < num_cpusets);  ix++) {
-        snprintf(fname, FNAME_SIZE, "%s%s/cpuset.memory_migrate", cpuset_dir, cpuset_list[ix]);
-        write_to_cpuset_file(fname, "0");
-    }
-    // Generate node list string from all the nodes, and write it out to the cpuset.mems file
-    str_from_id_list(buf, BUF_SIZE, all_nodes_list_p);
-    for (int ix = 0;  (ix < num_cpusets);  ix++) {
-        snprintf(fname, FNAME_SIZE, "%s%s/cpuset.mems", cpuset_dir, cpuset_list[ix]);
-        write_to_cpuset_file(fname, buf);
-    }
-    // Forget all the saved cpuset names
-    mystrdup(NULL);
     // Check pid still active
     snprintf(fname, FNAME_SIZE, "/proc/%d", p->pid);
     if (access(fname, F_OK) < 0) {
-        numad_log(LOG_WARNING, "Could not migrate pid %d\n", p->pid);
+        numad_log(LOG_WARNING, "Could not migrate pid %d.  Apparently it went away.\n", p->pid);
         return 0;
     } else {
         uint64_t t1 = get_time_stamp();
         p->bind_time_stamp = t1;
+        char node_list_str[BUF_SIZE];
+        str_from_id_list(node_list_str, BUF_SIZE, p->node_list_p);
         numad_log(LOG_NOTICE, "PID %d moved to node(s) %s in %d.%d seconds\n", p->pid, node_list_str, (t1-t0)/100, (t1-t0)%100);
         return 1;
     }
 }
 
-
-void show_nodes() {
-    fprintf(log_fs, "\n");
-    numad_log(LOG_INFO, "Nodes: %d\n", num_nodes);
-    fprintf(log_fs, "Min CPUs free: %ld, Max CPUs: %ld, Avg CPUs: %ld, StdDev: %lg\n", 
-        min_node_CPUs_free, max_node_CPUs_free, avg_node_CPUs_free, stddev_node_CPUs_free);
-    fprintf(log_fs, "Min MBs free: %ld, Max MBs: %ld, Avg MBs: %ld, StdDev: %lg\n", 
-        min_node_MBs_free, max_node_MBs_free, avg_node_MBs_free, stddev_node_MBs_free);
-    for (int ix = 0;  (ix < num_nodes);  ix++) {
-        fprintf(log_fs, "Node %d: MBs_total %ld, MBs_free %6ld, CPUs_total %ld, CPUs_free %4ld,  Distance: ", 
-            ix, node[ix].MBs_total, node[ix].MBs_free, node[ix].CPUs_total, node[ix].CPUs_free);
-        for (int d = 0;  (d < num_nodes);  d++) {
-            fprintf(log_fs, "%d ", node[ix].distance[d]);
-        }
-        char buf[BUF_SIZE];
-        str_from_id_list(buf, BUF_SIZE, node[ix].cpu_list_p);
-        fprintf(log_fs, " CPUs: %s\n", buf);
-    }
-    fflush(log_fs);
-}
 
 
 typedef struct cpu_data {
@@ -1309,7 +1107,6 @@ typedef struct cpu_data {
 
 cpu_data_t cpu_data_buf[2];  // Two sets, to calc deltas
 int cur_cpu_data_buf = 0;
-
 
 void update_cpu_data() {
     // Parse idle percents from CPU stats in /proc/stat cpu<N> lines
@@ -1363,7 +1160,6 @@ void update_cpu_data() {
     cur_cpu_data_buf = new;
 }
 
-
 int node_and_digits(const struct dirent *dptr) {
     char *p = (char *)(dptr->d_name);
     if (*p++ != 'n') return 0;
@@ -1378,6 +1174,31 @@ int node_and_digits(const struct dirent *dptr) {
 }
 
 
+uint64_t node_info_time_stamp = 0;
+id_list_p all_cpus_list_p = NULL;
+id_list_p all_nodes_list_p = NULL;
+id_list_p reserved_cpu_mask_list_p = NULL;
+char *reserved_cpu_str = NULL;
+
+void show_nodes() {
+    fprintf(log_fs, "\n");
+    numad_log(LOG_INFO, "Nodes: %d\n", num_nodes);
+    fprintf(log_fs, "Min CPUs free: %ld, Max CPUs: %ld, Avg CPUs: %ld, StdDev: %lg\n", 
+        min_node_CPUs_free, max_node_CPUs_free, avg_node_CPUs_free, stddev_node_CPUs_free);
+    fprintf(log_fs, "Min MBs free: %ld, Max MBs: %ld, Avg MBs: %ld, StdDev: %lg\n", 
+        min_node_MBs_free, max_node_MBs_free, avg_node_MBs_free, stddev_node_MBs_free);
+    for (int ix = 0;  (ix < num_nodes);  ix++) {
+        fprintf(log_fs, "Node %d: MBs_total %ld, MBs_free %6ld, CPUs_total %ld, CPUs_free %4ld,  Distance: ", 
+            ix, node[ix].MBs_total, node[ix].MBs_free, node[ix].CPUs_total, node[ix].CPUs_free);
+        for (int d = 0;  (d < num_nodes);  d++) {
+            fprintf(log_fs, "%d ", node[ix].distance[d]);
+        }
+        char buf[BUF_SIZE];
+        str_from_id_list(buf, BUF_SIZE, node[ix].cpu_list_p);
+        fprintf(log_fs, " CPUs: %s\n", buf);
+    }
+    fflush(log_fs);
+}
 
 int update_nodes() {
     char fname[FNAME_SIZE];
@@ -1437,6 +1258,7 @@ int update_nodes() {
             snprintf(fname, FNAME_SIZE, "/sys/devices/system/node/node%d/cpulist", node_id);
             int fd = open(fname, O_RDONLY, 0);
             if ((fd >= 0) && (read(fd, buf, BIG_BUF_SIZE) > 0)) {
+                buf[BIG_BUF_SIZE - 1] = '\0';
                 // get cpulist from the cpulist string
                 CLEAR_CPU_LIST(node[node_ix].cpu_list_p);
                 int n = add_ids_to_list_from_str(node[node_ix].cpu_list_p, buf);
@@ -1508,6 +1330,7 @@ int update_nodes() {
         if ((fd >= 0) && (read(fd, buf, BIG_BUF_SIZE) > 0)) {
             close(fd);
             uint64_t KB;
+            buf[BIG_BUF_SIZE - 1] = '\0';
             char *p = strstr(buf, "MemTotal:");
             if (p != NULL) {
                 p += 9;
@@ -1548,6 +1371,7 @@ int update_nodes() {
             sum_of_node_MBs_free += node[node_ix].MBs_free;
             if (min_node_MBs_free > node[node_ix].MBs_free) {
                 min_node_MBs_free = node[node_ix].MBs_free;
+                min_node_MBs_free_ix = node[node_ix].node_id;
             }
             if (max_node_MBs_free < node[node_ix].MBs_free) {
                 max_node_MBs_free = node[node_ix].MBs_free;
@@ -1592,6 +1416,7 @@ int update_nodes() {
             sum_of_node_CPUs_free += node[node_ix].CPUs_free;
             if (min_node_CPUs_free > node[node_ix].CPUs_free) {
                 min_node_CPUs_free = node[node_ix].CPUs_free;
+                min_node_CPUs_free_ix = node[node_ix].node_id;
             }
             if (max_node_CPUs_free < node[node_ix].CPUs_free) {
                 max_node_CPUs_free = node[node_ix].CPUs_free;
@@ -1689,11 +1514,11 @@ process_data_p get_stat_data_for_pid(int pid, char *pid_string) {
     }
     static char buf[BUF_SIZE];
     int bytes = read(fd, buf, BUF_SIZE);
+    close(fd);
     if (bytes < 50) {
         numad_log(LOG_WARNING, "Could not read stat file: %s\n", fname);
         return NULL;
     }
-    close(fd);
     uint64_t val;
     char *p = buf;
     static process_data_t data;
@@ -1818,23 +1643,32 @@ int initialize_mem_node_list(process_data_p p) {
     int n = 0;
     char fname[FNAME_SIZE];
     char buf[BIG_BUF_SIZE];
+    p->process_MBs = NULL;
     CLEAR_NODE_LIST(p->node_list_p);
     snprintf(fname, FNAME_SIZE, "/proc/%d/status", p->pid);
     int fd = open(fname, O_RDONLY, 0);
-    if ((fd >= 0) && (read(fd, buf, BIG_BUF_SIZE) > 0)) {
-        close(fd);
-        char *list_str_p = strstr(buf, "Mems_allowed_list:");
-        if (!list_str_p) {
-            numad_log(LOG_CRIT, "Could not get node Mems_allowed_list\n");
-            exit(EXIT_FAILURE);
-        }
-        list_str_p += 18;
-        while (!isdigit(*list_str_p)) { list_str_p++; }
-        n = add_ids_to_list_from_str(p->node_list_p, list_str_p);
-    } else {
+    if (fd < 0) {
         numad_log(LOG_WARNING, "Tried to research PID %d, but it apparently went away.\n", p->pid);
         return 0;  // Assume the process terminated
     }
+    int bytes = read(fd, buf, BIG_BUF_SIZE);
+    close(fd);
+    if (bytes <= 0) {
+        numad_log(LOG_WARNING, "Tried to research PID %d, but cannot read status file.\n", p->pid);
+        return 0;  // Assume the process terminated
+    } else if (bytes >= BIG_BUF_SIZE) {
+        buf[BIG_BUF_SIZE - 1] = '\0';
+    } else {
+        buf[bytes] = '\0';
+    }
+    char *list_str_p = strstr(buf, "Mems_allowed_list:");
+    if (!list_str_p) {
+        numad_log(LOG_CRIT, "Could not get node Mems_allowed_list\n");
+        exit(EXIT_FAILURE);
+    }
+    list_str_p += 18;
+    while (!isdigit(*list_str_p)) { list_str_p++; }
+    n = add_ids_to_list_from_str(p->node_list_p, list_str_p);
     if (n < num_nodes) {
         // If process already bound to a subset of nodes when we discover it,
         // set initial bind_time_stamp to 30 minutes ago...
@@ -1842,8 +1676,6 @@ int initialize_mem_node_list(process_data_p p) {
     }
     return n;
 }
-
-
 
 
 uint64_t combined_value_of_weighted_resources(int ix, int mbs, int cpus, uint64_t MBs_free, uint64_t CPUs_free) {
@@ -1867,8 +1699,8 @@ uint64_t combined_value_of_weighted_resources(int ix, int mbs, int cpus, uint64_
     }
     // Weight the available resources, and then calculate magnitude as
     // product of available CPUs and available MBs.
-    int64_t memfactor = (needed_mem * 10 + excess_mem * 3);
-    int64_t cpufactor = (needed_cpu * 8 + excess_cpu * 1);
+    int64_t memfactor = (needed_mem * 10 + excess_mem * 4);
+    int64_t cpufactor = (needed_cpu *  6 + excess_cpu * 1);
     numad_log(LOG_DEBUG, "    Node[%d]: mem: %ld  cpu: %ld\n", ix, memfactor, cpufactor);
     return (memfactor * cpufactor);
 }
@@ -1879,33 +1711,12 @@ id_list_p pick_numa_nodes(int pid, int cpus, int mbs, int assume_enough_cpus) {
         numad_log(LOG_DEBUG, "PICK NODES FOR:  PID: %d,  CPUs %d,  MBs %d\n", pid, cpus, mbs);
     }
     char buf[BUF_SIZE];
-    uint64_t process_CPUs = 0;
-    uint64_t nonlocal_memory = 0;
-    static node_data_p tmp_node;
-    static uint64_t *process_MBs;
-    static int process_MBs_num_nodes;
-    // See if dynamic structures need to grow.
-    if (process_MBs_num_nodes < num_nodes + 1) {
-        process_MBs_num_nodes = num_nodes + 1;
-        // The "+1 node" is for accumulating interleaved memory
-        process_MBs = realloc(process_MBs, process_MBs_num_nodes * sizeof(uint64_t));
-        tmp_node = realloc(tmp_node, num_nodes * sizeof(node_data_t) );
-        if ((process_MBs == NULL) || (tmp_node == NULL)) {
-            numad_log(LOG_CRIT, "process_MBs realloc failed\n");
-            exit(EXIT_FAILURE);
-        }
-    }
-    // zero per node memory used by this process accounting
-    memset(process_MBs, 0, process_MBs_num_nodes * sizeof(uint64_t));
+    uint64_t proc_avg_node_CPUs_free = 0;
     // For existing processes, get miscellaneous process specific details
     int pid_ix;
     process_data_p p = NULL;
     if ((pid > 0) && ((pid_ix = process_hash_lookup(pid)) >= 0)) {
         p = &process_hash_table[pid_ix];
-	// The cpus amount requested might be modified by utilization target
-	// and capped by number of threads, so go back to empirical amount of
-	// CPUs actually used to add back into resource assessment (below).
-        process_CPUs = p->CPUs_used;
         // Add up per-node memory in use by this process.
         // This scanning is expensive and should be minimized.
         char fname[FNAME_SIZE];
@@ -1915,65 +1726,61 @@ id_list_p pick_numa_nodes(int pid, int cpus, int mbs, int assume_enough_cpus) {
             numad_log(LOG_WARNING, "Tried to research PID %d numamaps, but it apparently went away.\n", p->pid);
             return NULL;  // Assume the process terminated
         }
+        // Allocate and zero per node memory array.
+        // The "+1 node" is for accumulating interleaved memory
+        p->process_MBs = realloc(p->process_MBs, (num_nodes + 1) * sizeof(uint64_t));
+        if (p->process_MBs == NULL) {
+            numad_log(LOG_CRIT, "p->process_MBs realloc failed\n");
+            exit(EXIT_FAILURE);
+        }
+        memset(p->process_MBs, 0, (num_nodes + 1) * sizeof(uint64_t));
         int process_has_interleaved_memory = 0;
         while (fgets(buf, BUF_SIZE, fs)) {
             int interleaved_memory = 0;
             uint64_t page_size = page_size_in_bytes;
             const char *delimiters = " \n";
-            char *p = strtok(buf, delimiters);
-            while (p) {
-                if (!strncmp(p, "interleave", 10)) {
+            char *str_p = strtok(buf, delimiters);
+            while (str_p) {
+                if (!strncmp(str_p, "interleave", 10)) {
                     interleaved_memory = 1;
                     process_has_interleaved_memory = 1;
-                } else if (!strcmp(p, "huge")) {
+                } else if (!strcmp(str_p, "huge")) {
                     page_size = huge_page_size_in_bytes;
-                } else if (*p++ == 'N') {
+                } else if (*str_p++ == 'N') {
                     int node;
                     uint64_t pages;
-                    CONVERT_DIGITS_TO_NUM(p, node);
-                    if (*p++ != '=') {
+                    CONVERT_DIGITS_TO_NUM(str_p, node);
+                    if (*str_p++ != '=') {
                         numad_log(LOG_CRIT, "numa_maps node number parse error\n");
                         exit(EXIT_FAILURE);
                     }
-                    CONVERT_DIGITS_TO_NUM(p, pages);
-                    process_MBs[node] += (pages * page_size);
+                    CONVERT_DIGITS_TO_NUM(str_p, pages);
+                    p->process_MBs[node] += (pages * page_size);
                     if (interleaved_memory) {
                         // sum interleaved quantity in "extra node"
-                        process_MBs[num_nodes] += (pages * page_size);
+                        p->process_MBs[num_nodes] += (pages * page_size);
                     }
                 }
                 // Get next token on the line
-                p = strtok(NULL, delimiters);
+                str_p = strtok(NULL, delimiters);
             }
         }
         fclose(fs);
+        proc_avg_node_CPUs_free = p->CPUs_used;
         for (int ix = 0;  (ix <= num_nodes);  ix++) {
-            process_MBs[ix] /= MEGABYTE;
-            if (p->bind_time_stamp) {
-                if ((process_MBs[ix]) && (!ID_IS_IN_LIST(ix, p->node_list_p))) {
-                    // If process previously bound, but memory appears to exist
-                    // where it should not, new nonlocal memory might have been
-                    // allocated, or this might identify processes for which
-                    // the kernel does not move all the memory for whatever
-                    // reason....  Add it up for later threshold test.
-                    nonlocal_memory += process_MBs[ix];
-                }
-            } else {
-                // If process has not yet been bound, set node list to existing nodes with memory
-                if (process_MBs[ix]) {
-                    ADD_ID_TO_LIST(ix, p->node_list_p);
+            p->process_MBs[ix] /= MEGABYTE;
+            if ((log_level >= LOG_DEBUG) && (p->process_MBs[ix] > 0)) {
+                if (ix == num_nodes) {
+                    numad_log(LOG_DEBUG, "Interleaved MBs: %ld\n", ix, p->process_MBs[ix]);
                 } else {
-                    CLR_ID_IN_LIST(ix, p->node_list_p);
+                    numad_log(LOG_DEBUG, "PROCESS_MBs[%d]: %ld\n", ix, p->process_MBs[ix]);
                 }
             }
-            if ((log_level >= LOG_DEBUG) && (process_MBs[ix] > 0)) {
-                if (ix == num_nodes) {
-                    numad_log(LOG_DEBUG, "Interleaved MBs: %ld\n", ix, process_MBs[ix]);
-                } else {
-                    numad_log(LOG_DEBUG, "PROCESS_MBs[%d]: %ld\n", ix, process_MBs[ix]);
-                }
+            if (ID_IS_IN_LIST(ix, p->node_list_p)) {
+                proc_avg_node_CPUs_free += node[ix].CPUs_free;
             }
         }
+        proc_avg_node_CPUs_free /= NUM_IDS_IN_LIST(p->node_list_p);
         if ((process_has_interleaved_memory) && (keep_interleaved_memory)) {
             // Mark this process as having interleaved memory so we do not
             // merge the interleaved memory.  Time stamp it as done and return.
@@ -1987,28 +1794,39 @@ id_list_p pick_numa_nodes(int pid, int cpus, int mbs, int assume_enough_cpus) {
     }  // end of existing PID conditional
     // Make a copy of node available resources array.  Add in info specific to
     // this process to equalize available resource quantities wrt locations of
-    // resources already in use by this process.  After calculating weighted
-    // magnitude of available resources, bias the values towards existing
-    // locations for this process.
+    // resources already in use by this process.
+    static node_data_p tmp_node;
+    tmp_node = realloc(tmp_node, num_nodes * sizeof(node_data_t) );
+    if (tmp_node == NULL) {
+        numad_log(LOG_CRIT, "tmp_node realloc failed\n");
+        exit(EXIT_FAILURE);
+    }
     memcpy(tmp_node, node, num_nodes * sizeof(node_data_t) );
+    uint64_t sum_of_node_CPUs_free = 0;
     for (int ix = 0;  (ix < num_nodes);  ix++) {
         if (pid > 0) {
-            // Add back (biased) memory already used by this process on this node
-            tmp_node[ix].MBs_free  += ((process_MBs[ix] * 33) / 32);  // Apply existing mem bias
-            if (tmp_node[ix].MBs_free > tmp_node[ix].MBs_total) {
-                tmp_node[ix].MBs_free = tmp_node[ix].MBs_total;
+            if (NUM_IDS_IN_LIST(p->node_list_p) >= num_nodes) {
+                // Process not yet bound to a subset of nodes.
+                // Add back memory used by this process on this node.
+                tmp_node[ix].MBs_free += ((p->process_MBs[ix] * 17) / 16);  // Apply light mem bias
+                // Add back CPU used by this process in proportion to the memory used on this node.
+                tmp_node[ix].CPUs_free += ((p->CPUs_used * p->process_MBs[ix]) / p->MBs_used);
+            } else {
+                // If the process is currently running on less than all the
+                // nodes, first add back (biased) memory already used by this
+                // process on this node, then assign average process CPU / node
+                // for this process iff the process is present on this node.
+                tmp_node[ix].MBs_free += ((p->process_MBs[ix] * 5) / 4);  // Apply heavy mem bias
+                if (ID_IS_IN_LIST(ix, p->node_list_p)) {
+                    tmp_node[ix].CPUs_free = proc_avg_node_CPUs_free;
+                }
             }
-            // Add back CPU in proportion to amount of memory already used on this
-            // node Making assumption here that CPU execution threads are actually
-            // running on the same nodes where memory is assigned...  FIXME: should
-            // we perhaps do this only if process already explicitly bound?
-            uint64_t prorated_CPU = (process_CPUs * process_MBs[ix]) / p->MBs_used;
-            if ((log_level >= LOG_DEBUG) && (prorated_CPU > 0)) {
-                numad_log(LOG_DEBUG, "PROCESS_CPUs[%d]: %ld\n", ix, prorated_CPU);
-            }
-            tmp_node[ix].CPUs_free += prorated_CPU;
+            sum_of_node_CPUs_free += tmp_node[ix].CPUs_free;
             if (tmp_node[ix].CPUs_free > tmp_node[ix].CPUs_total) {
                 tmp_node[ix].CPUs_free = tmp_node[ix].CPUs_total;
+            }
+            if (tmp_node[ix].MBs_free > tmp_node[ix].MBs_total) {
+                tmp_node[ix].MBs_free = tmp_node[ix].MBs_total;
             }
         }
         // Enforce 1/100th CPU minimum
@@ -2017,16 +1835,15 @@ id_list_p pick_numa_nodes(int pid, int cpus, int mbs, int assume_enough_cpus) {
         }
         // numad_log(LOG_DEBUG, "Raw Node[%d]: mem: %ld  cpu: %ld\n", ix, tmp_node[ix].MBs_free, tmp_node[ix].CPUs_free);
         tmp_node[ix].magnitude = combined_value_of_weighted_resources(ix, mbs, cpus, tmp_node[ix].MBs_free, tmp_node[ix].CPUs_free);
-        // Bias combined magnitude towards already assigned nodes
-        if ((pid > 0) && (ID_IS_IN_LIST(ix, p->node_list_p))) {
-            tmp_node[ix].magnitude *= 33;
-            tmp_node[ix].magnitude /= 32;
-        }
     }
-    // Figure out where to get resources for this request.
-    int prev_node_used = -1;
+    // Now figure out where to get resources for this request....
     static id_list_p target_node_list_p;
     CLEAR_NODE_LIST(target_node_list_p);
+    if ((pid > 0) && (cpus > sum_of_node_CPUs_free)) {
+        // System CPUs might be oversubscribed, but...
+        assume_enough_cpus = 1;
+        // and rely on available memory for placement.
+    }
     // Establish a CPU flex fudge factor, on the presumption it is OK if not
     // quite all the CPU request is met.  However, if trying to find resources
     // for pre-placement advice request, do not underestimate the amount of
@@ -2034,8 +1851,8 @@ id_list_p pick_numa_nodes(int pid, int cpus, int mbs, int assume_enough_cpus) {
     int cpu_flex = 0;
     if ((pid > 0) && (target_utilization < 100)) {
         // FIXME: Is half of the utilization margin a good amount of CPU flexing?
-        cpu_flex = ((100 - target_utilization) * tmp_node[0].CPUs_total) / 200;
-    } 
+        cpu_flex = ((100 - target_utilization) * node[0].CPUs_total) / 200;
+    }
     // Figure out minimum number of nodes required
     int mem_req_nodes = ceil((double)mbs  / (double)node[0].MBs_total);
     int cpu_req_nodes = ceil((double)(cpus - cpu_flex) / (double)node[0].CPUs_total); 
@@ -2043,49 +1860,104 @@ id_list_p pick_numa_nodes(int pid, int cpus, int mbs, int assume_enough_cpus) {
     if (min_req_nodes < cpu_req_nodes) {
         min_req_nodes = cpu_req_nodes;
     }
-    // Continue to allocate more resources until request are met.
+    if (min_req_nodes > num_nodes) {
+        min_req_nodes = num_nodes;
+    }
+    // Use an index to sort NUMA connected resource chain for each node
+    int index[num_nodes];
+    uint64_t totmag[num_nodes];
+    for (int ix = 0;  (ix < num_nodes);  ix++) {
+        // Reset the index each time
+        for (int n = 0;  (n < num_nodes);  n++) {
+            index[n] = n;
+        }
+        // Sort by minimum relative NUMA distance from node[ix],
+        // breaking distance ties with magnitude of available resources
+        for (int ij = 0;  (ij < num_nodes);  ij++) {
+            int best_ix = ij;
+            for (int ik = ij + 1;  (ik < num_nodes);  ik++) {
+                int ik_dist = tmp_node[index[ik]].distance[ix];
+                int best_ix_dist = tmp_node[index[best_ix]].distance[ix];
+                if (best_ix_dist > ik_dist) {
+                    best_ix = ik;
+                } else if (best_ix_dist == ik_dist) {
+                    if (tmp_node[index[best_ix]].magnitude < tmp_node[index[ik]].magnitude ) {
+                        best_ix = ik;
+                    }
+                }
+            }
+            if (best_ix != ij) {
+                int tmp = index[ij];
+                index[ij] = index[best_ix];
+                index[best_ix] = tmp;
+            }
+        }
+#if 0
+        if (log_level >= LOG_DEBUG) {
+            for (int iq = 0;  (iq < num_nodes);  iq++) {
+                numad_log(LOG_DEBUG, "Node: %d  Dist: %d  Magnitude: %ld\n",
+                    tmp_node[index[iq]].node_id, tmp_node[index[iq]].distance[ix], tmp_node[index[iq]].magnitude);
+            }
+        }
+#endif
+        // Save the totmag[] sum of the magnitudes of expected needed nodes,
+        // "normalized" by NUMA distance (by dividing each magnitude by the
+        // relative distance squared).
+        totmag[ix] = 0;
+        for (int ij = 0;  (ij < min_req_nodes);  ij++) {
+            int dist = tmp_node[index[ij]].distance[ix];
+            totmag[ix] += (tmp_node[index[ij]].magnitude / (dist * dist));
+        }
+        numad_log(LOG_DEBUG, "Totmag[%d]: %ld\n", ix, totmag[ix]);
+    }
+    // Now find the best NUMA node based on the normalized sum of node
+    // magnitudes expected to be used.
+    int best_node_ix = 0;
+    for (int ix = 0;  (ix < num_nodes);  ix++) {
+        if (totmag[best_node_ix] < totmag[ix]) {
+            best_node_ix = ix;
+        }
+    }
+    numad_log(LOG_DEBUG, "best_node_ix: %d\n", best_node_ix);
+    // Reset sorting index again
+    for (int n = 0;  (n < num_nodes);  n++) {
+        index[n] = n;
+    }
+    // Sort index by distance from node[best_node_ix],
+    // breaking distance ties with magnitude
+    for (int ij = 0;  (ij < num_nodes);  ij++) {
+        int best_ix = ij;
+        for (int ik = ij + 1;  (ik < num_nodes);  ik++) {
+            int ik_dist = tmp_node[index[ik]].distance[best_node_ix];
+            int best_ix_dist = tmp_node[index[best_ix]].distance[best_node_ix];
+            if (best_ix_dist > ik_dist) {
+                best_ix = ik;
+            } else if (best_ix_dist == ik_dist) {
+                if (tmp_node[index[best_ix]].magnitude < tmp_node[index[ik]].magnitude ) {
+                    best_ix = ik;
+                }
+            }
+        }
+        if (best_ix != ij) {
+            int tmp = index[ij];
+            index[ij] = index[best_ix];
+            index[best_ix] = tmp;
+        }
+    }
+    if (log_level >= LOG_DEBUG) {
+        for (int iq = 0;  (iq < num_nodes);  iq++) {
+            numad_log(LOG_DEBUG, "Node: %d  Dist: %d  Magnitude: %ld\n",
+                tmp_node[index[iq]].node_id, tmp_node[index[iq]].distance[best_node_ix], tmp_node[index[iq]].magnitude);
+        }
+    }
+    // Allocate more resources until request is met.
+    best_node_ix = 0;
     while ((min_req_nodes > 0) || (mbs > 0) || ((cpus > cpu_flex) && (!assume_enough_cpus))) {
         if (log_level >= LOG_DEBUG) {
             numad_log(LOG_DEBUG, "MBs: %d,  CPUs: %d\n", mbs, cpus);
         }
-        // Sort nodes by magnitude of available resources.  Note that
-        // inter-node distances (to the previous node used) are factored into
-        // the sort.
-        for (int ij = 0;  (ij < num_nodes);  ij++) {
-            int big_ix = ij;
-            for (int ik = ij + 1;  (ik < num_nodes);  ik++) {
-                uint64_t ik_dist = 1;
-                uint64_t big_ix_dist = 1;
-                if (prev_node_used >= 0) {
-                    ik_dist = tmp_node[ik].distance[prev_node_used];
-                    big_ix_dist = tmp_node[big_ix].distance[prev_node_used];
-                }
-                // Scale magnitude comparison by distances to previous node used...
-                if ((tmp_node[big_ix].magnitude / big_ix_dist) < (tmp_node[ik].magnitude / ik_dist)) {
-                    big_ix = ik;
-                }
-            }
-            if (big_ix != ij) {
-                node_data_t tmp;
-                memcpy((void *)&tmp, (void *)&tmp_node[ij], sizeof(node_data_t) );
-                memcpy((void *)&tmp_node[ij], (void *)&tmp_node[big_ix], sizeof(node_data_t) );
-                memcpy((void *)&tmp_node[big_ix], (void *)&tmp, sizeof(node_data_t) );
-            }
-        }
-        if (log_level >= LOG_DEBUG) {
-            for (int ix = 0;  (ix < num_nodes);  ix++) {
-                numad_log(LOG_DEBUG, "Sorted magnitude[%d]: %ld\n", tmp_node[ix].node_id, tmp_node[ix].magnitude);
-            }
-        }
-        if (tmp_node[0].node_id == prev_node_used) {
-            // Hmmm.  Looks like the best node for more resources, is also the
-            // last one we used.  This is not going to make progress...  So
-            // just punt and use everything.
-            OR_LISTS(target_node_list_p, target_node_list_p, all_nodes_list_p);
-            break;
-        }
-        prev_node_used = tmp_node[0].node_id;
-        ADD_ID_TO_LIST(tmp_node[0].node_id, target_node_list_p);
+        numad_log(LOG_DEBUG, "Assigning resources from node %d\n", index[best_node_ix]);
+        ADD_ID_TO_LIST(tmp_node[index[best_node_ix]].node_id, target_node_list_p);
         min_req_nodes -= 1;
         if (EQUAL_LISTS(target_node_list_p, all_nodes_list_p)) {
             // Apparently we must use all resource nodes...
@@ -2094,36 +1966,43 @@ id_list_p pick_numa_nodes(int pid, int cpus, int mbs, int assume_enough_cpus) {
         // "Consume" the resources on this node
 #define CPUS_MARGIN 0
 #define MBS_MARGIN 100
-        if (tmp_node[0].MBs_free >= (mbs + MBS_MARGIN)) {
-            tmp_node[0].MBs_free -= mbs;
+        if (tmp_node[index[best_node_ix]].MBs_free >= (mbs + MBS_MARGIN)) {
+            tmp_node[index[best_node_ix]].MBs_free -= mbs;
             mbs = 0;
         } else {
-            mbs -= (tmp_node[0].MBs_free - MBS_MARGIN);
-            tmp_node[0].MBs_free = MBS_MARGIN;
+            mbs -= (tmp_node[index[best_node_ix]].MBs_free - MBS_MARGIN);
+            tmp_node[index[best_node_ix]].MBs_free = MBS_MARGIN;
         }
-        if (tmp_node[0].CPUs_free >= (cpus + CPUS_MARGIN)) {
-            tmp_node[0].CPUs_free -= cpus;
+        if (tmp_node[index[best_node_ix]].CPUs_free >= (cpus + CPUS_MARGIN)) {
+            tmp_node[index[best_node_ix]].CPUs_free -= cpus;
             cpus = 0;
         } else {
-            cpus -= (tmp_node[0].CPUs_free - CPUS_MARGIN);
-            tmp_node[0].CPUs_free = CPUS_MARGIN;
+            cpus -= (tmp_node[index[best_node_ix]].CPUs_free - CPUS_MARGIN);
+            tmp_node[index[best_node_ix]].CPUs_free = CPUS_MARGIN;
         }
-        tmp_node[0].magnitude = combined_value_of_weighted_resources(0, mbs, cpus, tmp_node[0].MBs_free, tmp_node[0].CPUs_free);
+        // Next line optional, since we will not look at that node again
+        tmp_node[index[best_node_ix]].magnitude = combined_value_of_weighted_resources(0, mbs, cpus, tmp_node[index[best_node_ix]].MBs_free, tmp_node[index[best_node_ix]].CPUs_free);
+        best_node_ix += 1;
     }
-    // If this existing process is already located where we want it, then just
-    // return NULL indicating no need to change binding this time.  Check the
-    // ammount of nonlocal memory against the target_memlocality_perecent.
-    if ((pid > 0) && (p->bind_time_stamp) && (EQUAL_LISTS(target_node_list_p, p->node_list_p))) {
-        if (log_level >= LOG_DEBUG) {
-            numad_log(LOG_DEBUG, "Process %d already bound to target nodes.\n", p->pid);
-        }
-        int non_local_percent = (100 * nonlocal_memory) / p->MBs_used;
-        if (non_local_percent > (100 - target_memlocality)) {
-            if (log_level >= LOG_DEBUG) {
-                numad_log(LOG_DEBUG, "But %d percent of process memory is non-local -- so rebinding.\n", non_local_percent);
+    // For existing processes, calculate the non-local memory percent to see if
+    // process is already in the right place.
+    if ((pid > 0) && (p != NULL)) {
+        uint64_t nonlocal_memory = 0;
+        for (int ix = 0;  (ix < num_nodes);  ix++) {
+            if (!ID_IS_IN_LIST(ix, target_node_list_p)) {
+                // Accumulate total of nonlocal memory
+                nonlocal_memory += p->process_MBs[ix];
             }
-        } else {
-            // Enough of the memory is located where we want it, so no current need to rebind
+        }
+        int disp_percent = (100 * nonlocal_memory) / p->MBs_used;
+        // If this existing process is already located where we want it, then just
+        // return NULL indicating no need to change binding this time.  Check the
+        // ammount of nonlocal memory against the target_memlocality_perecent.
+        if ((disp_percent <= (100 - target_memlocality)) && (p->bind_time_stamp) && (EQUAL_LISTS(target_node_list_p, p->node_list_p))) {
+            // Already bound to targets, and enough of the memory is located where we want it, so no need to rebind
+            if (log_level >= LOG_DEBUG) {
+                numad_log(LOG_DEBUG, "Process %d already %d percent localized to target nodes.\n", p->pid, 100 - disp_percent);
+            }
             p->bind_time_stamp = get_time_stamp();
             return NULL;
         }
@@ -2147,13 +2026,10 @@ id_list_p pick_numa_nodes(int pid, int cpus, int mbs, int assume_enough_cpus) {
     }
     numad_log(LOG_NOTICE, "Advising pid %d %s move from nodes (%s) to nodes (%s)\n", pid, cmd_name, buf, buf2);
     if (pid > 0) {
-        // FIXME: Consider moving this out to caller??
         COPY_LIST(target_node_list_p, p->node_list_p);
     }
     return target_node_list_p;
 }
-
-
 
 
 int manage_loads() {
@@ -2179,7 +2055,7 @@ int manage_loads() {
     long sum_CPUs_used = 0;
     for (int ix = 0;  (ix < process_hash_table_size);  ix++) {
         process_data_p p = &process_hash_table[ix];
-        if ((p->pid) && (p->CPUs_used * p->MBs_used > CPU_THRESHOLD * MEMORY_THRESHOLD)) {
+        if ((p->pid) && (p->CPUs_used > CPU_THRESHOLD) && (p->MBs_used > MEMORY_THRESHOLD)) {
             pindex[nprocs++] = p;
             sum_CPUs_used += p->CPUs_used;
             // Initialize node list, if not already done for this process.
@@ -2233,7 +2109,7 @@ int manage_loads() {
             }
             if ((diff_mag > 0) && (min_mag / diff_mag < 5)) {
                 // difference > 20 percent.  Use magnitude ordering
-                if (ik_mag >= best_mag) continue;
+                if (ik_mag <= best_mag) continue;
             } else {
                 // difference within 20 percent.  Sort these by bind_time_stamp.
                 if (pindex[ik]->bind_time_stamp > pindex[best]->bind_time_stamp) continue;
@@ -2262,20 +2138,6 @@ int manage_loads() {
     // make resource requests for each candidate process
     for (int ix = 0;  (ix < nprocs);  ix++) {
         process_data_p p = pindex[ix];
-        // If this process was recently bound, enforce a three-minute minimum
-        // delay between repeated attempts to potentially move the process.
-        // FIXME: make this delay contingent on node resource equity?   Or,
-        // maybe change in running averages? Perhaps detect change in averages,
-        // or look at stddev? What is a good range for the delay?  Discrete or
-        // continuous?
-#define MIN_DELAY_FOR_REEVALUATION (180 * ONE_HUNDRED)
-        if (p->bind_time_stamp + MIN_DELAY_FOR_REEVALUATION > time_stamp) {
-            // Skip re-evaluation because we just did it recently.
-            if (log_level >= LOG_DEBUG) {
-                numad_log(LOG_DEBUG, "Skipping evaluation of PID %d because done too recently.\n", p->pid);
-            }
-            continue;
-        }
         // If this process has interleaved memory, recheck it only every 30 minutes...
 #define MIN_DELAY_FOR_INTERLEAVE (1800 * ONE_HUNDRED)
         if (((p->flags & PROCESS_FLAG_INTERLEAVED) > 0)
@@ -2296,10 +2158,10 @@ int manage_loads() {
             mem_target_utilization = 100;
         }
         // If the process virtual memory size is bigger than one node, and it
-        // is already using more than 66 percent of a node, then request MBs
+        // is already using more than 80 percent of a node, then request MBs
         // based on the virtual size rather than on the current amount in use.
         int mb_request;
-        if ((p->MBs_size > node[0].MBs_total) && ((p->MBs_used * 3 / 2) > node[0].MBs_total)) {
+        if ((p->MBs_size > node[0].MBs_total) && ((p->MBs_used * 5 / 4) > node[0].MBs_total)) {
             mb_request = (p->MBs_size * 100) / mem_target_utilization;
         } else {
             mb_request = (p->MBs_used * 100) / mem_target_utilization;
@@ -2321,6 +2183,35 @@ int manage_loads() {
         if (cpu_request > thread_limit) {
             cpu_request = thread_limit;
         }
+        // If this process was recently bound, enforce a five-minute minimum
+        // delay between repeated attempts to potentially move the process.
+#define MIN_DELAY_FOR_REEVALUATION (300 * ONE_HUNDRED)
+        if (p->bind_time_stamp + MIN_DELAY_FOR_REEVALUATION > time_stamp) {
+            // Skip re-evaluation because we just did it recently, but check
+            // first for node utilization balance to see if we should
+            // re-evaluate this particular process right now.  If this process
+            // is running on one of the busiest nodes, go ahead and re-evaluate
+            // it if it looks like it should have a better place with
+            // sufficient resources.  FIXME: this is currently implemented for
+            // only smallish processes that will fit in a single node.
+            if ( ( ID_IS_IN_LIST(min_node_CPUs_free_ix, p->node_list_p) || ID_IS_IN_LIST(min_node_MBs_free_ix, p->node_list_p))
+                && (cpu_request < node[0].CPUs_total) && (mb_request < node[0].MBs_total) 
+                && (abs(min_node_CPUs_free + p->CPUs_used - avg_node_CPUs_free) 
+                    + abs((max_node_CPUs_free - p->CPUs_used) - avg_node_CPUs_free) 
+                    < (max_node_CPUs_free - min_node_CPUs_free) - CPU_THRESHOLD)  // CPU slop
+                && (abs(min_node_MBs_free + p->MBs_used - avg_node_MBs_free)
+                    + abs((max_node_MBs_free - p->MBs_used) - avg_node_MBs_free) 
+                    < (max_node_MBs_free - min_node_MBs_free)) ) { 
+                if (log_level >= LOG_DEBUG) {
+                    numad_log(LOG_DEBUG, "Bypassing delay for %d because it looks like it can do better.\n", p->pid);
+                }
+            } else {
+                if (log_level >= LOG_DEBUG) {
+                    numad_log(LOG_DEBUG, "Skipping evaluation of PID %d because done too recently.\n", p->pid);
+                }
+                continue;
+            }
+        }
         // OK, now pick NUMA nodes for this process and bind it!
         pthread_mutex_lock(&node_info_mutex);
         int assume_enough_cpus = (sum_CPUs_used <= sum_CPUs_total);
@@ -2335,7 +2226,6 @@ int manage_loads() {
     // Return maximum interval when no process movement
     return max_interval;
 }
-
 
 
 void *set_dynamic_options(void *arg) {
@@ -2516,7 +2406,7 @@ int main(int argc, char *argv[]) {
             log_level = LOG_DEBUG;
             break;
         case 'D':
-            cpuset_dir_list[0] = strdup(optarg);
+            // obsoleted
             break;
         case 'h':
             print_usage_and_exit(argv[0]);
@@ -2681,7 +2571,7 @@ int main(int argc, char *argv[]) {
         str_from_id_list(buf, BUF_SIZE, reserved_cpu_mask_list_p);
         numad_log(LOG_NOTICE, "Reserving %d CPUs (%s) for non-numad use\n", n, buf);
         // turn reserved list into a negated mask for later ANDing use...
-        negate_list(reserved_cpu_mask_list_p);
+        negate_cpu_list(reserved_cpu_mask_list_p);
     }
     // If it is a "-w" pre-placement request, handle that without starting
     // the daemon.  Otherwise start the numad daemon.
@@ -2735,7 +2625,6 @@ int main(int argc, char *argv[]) {
         // Allocate initial process hash table
         process_hash_table_expand();
         // Spawn a thread to handle messages from subsequent invocation requests
-        // and also a lazy background thread to clean up obsolete cpusets.
         pthread_mutex_init(&pid_list_mutex, NULL);
         pthread_mutex_init(&node_info_mutex, NULL);
         pthread_attr_t attr;
@@ -2748,10 +2637,6 @@ int main(int argc, char *argv[]) {
             numad_log(LOG_CRIT, "pthread_create failure: setting thread\n");
             exit(EXIT_FAILURE);
         }
-        if (pthread_create(&tid, &attr, &clean_obsolete_cpusets, &tid) != 0) {
-            numad_log(LOG_CRIT, "pthread_create failure: cleaning thread\n");
-            exit(EXIT_FAILURE);
-        }
         // Loop here forwever...
         for (;;) {
             int interval = max_interval;
@@ -2761,6 +2646,10 @@ int main(int argc, char *argv[]) {
             if (nodes > 1) {
                 update_processes();
                 interval = manage_loads();
+                if (interval < max_interval) {
+                    // Update node info since we moved something
+                    nodes = update_nodes();
+                }
             }
             sleep(interval);
             if (got_sigterm | got_sigquit) {

@@ -11,9 +11,6 @@ numad [\fI\-dhvV\fP]
 numad  [\fI\-C 0|1\fP]
 .br
 .LP
-numad  [\fI\-D non-standard-cgroup-mount-point\fP]
-.br
-.LP
 numad  [\fI\-H THP_hugepage_scan_sleep_ms\fP]
 .br
 .LP
@@ -79,19 +76,17 @@ resource.
 \fB\-d\fR
 Debug output in log, sets the log level to LOG_DEBUG.  Same effect as \fI\-l 7\fP.
 .TP
-\fB\-D\fR <\fInon-standard-cgroup-mount-point\fP>
-This option can be used to communicate a non-standard cgroup mount point to
-numad.  This is not normally necessary.
-.TP
 \fB\-h\fR
 Display usage help information and then exit.
 .TP
 \fB\-H\fR  <\fITHP_scan_sleep_ms\fP>
 Set the desired transparent hugepage scan interval in ms.  The
-/sys/kernel/mm/tranparent_hugepage/khugepaged/scan_sleep_millisecs tunable is
-usually set to 10000ms by the operating system.  The default is changed by
-numad to be 1000ms since it is helpful for the hugepage daemon to be more
-aggressive when memory moves between nodes.  Specifying (\fI\-H 0\fP) will
+.na
+/sys/kernel/mm/tranparent_hugepage/khugepaged/scan_sleep_millisecs
+.ad
+tunable is usually set to 10000ms by the operating system.  The default is
+changed by numad to be 1000ms since it is helpful for the hugepage daemon to be
+more aggressive when memory moves between nodes.  Specifying (\fI\-H 0\fP) will
 cause numad to retain the system default value.  You can also make the hugepage
 daemon more or less aggressive by specifying an alternate value with this
 option.  For example, setting this value to 100ms (\fI\-H 100\fP) might improve
