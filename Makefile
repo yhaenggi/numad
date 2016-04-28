@@ -45,13 +45,16 @@ RANLIB ?= ranlib
 # BB_FIXME MANPAGES := numa.3 numactl.8 numastat.8 migratepages.8 migspeed.8
 
 install: numad
-	mkdir -p ${prefix}/bin
-	mkdir -p ${prefix}/share/man/man8
-	install -m 0755 numad ${prefix}/bin
-	install -m 0644 numad.8 ${prefix}/share/man/man8
-	install -m 0644 numad.conf /etc/default/numad
-	install -m 0755 numad.init /etc/init.d/numad
-	install -m 0644 numad.logrotate /etc/logrotate.d/numad
+	mkdir -p $(DESTDIR)/etc/default
+	mkdir -p $(DESTDIR)/etc/logrotate.d
+	mkdir -p $(DESTDIR)/etc/init.d
+	mkdir -p $(DESTDIR)${prefix}/bin
+	mkdir -p $(DESTDIR)${prefix}/share/man/man8
+	install -m 0755 numad $(DESTDIR)${prefix}/bin
+	install -m 0644 numad.8 $(DESTDIR)${prefix}/share/man/man8
+	install -m 0644 numad.conf $(DESTDIR)/etc/default/numad
+	install -m 0755 numad.init $(DESTDIR)/etc/init.d/numad
+	install -m 0644 numad.logrotate $(DESTDIR)/etc/logrotate.d/numad
 	update-rc.d numad defaults
 	service numad restart
 
