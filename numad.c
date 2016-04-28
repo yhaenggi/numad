@@ -57,7 +57,7 @@ Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
 #include <asm/unistd.h>
 
 
-#define VERSION_STRING "20150602"
+#define VERSION_STRING "20160428"
 
 
 #define VAR_RUN_FILE "/var/run/numad.pid"
